@@ -1,8 +1,5 @@
-# delta_optimizer
-Automated Optimization System for a Delta-based Lakehouse running on Spark or Photon
-
-
 # Delta Optimizer
+Automated Optimization System for a Delta-based Lakehouse running on Spark or Photon
 
 
 <img width="1279" alt="delta_io" src="https://delta.io/static/delta-hp-hero-bottom-46084c40468376aaecdedc066291e2d8.png">
