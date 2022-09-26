@@ -4,7 +4,8 @@ Automated Optimization System for a Delta-based Lakehouse running on Spark or Ph
 
 # Delta Optimizer
 
-<img src=”https://delta.io/static/delta-hp-hero-bottom-46084c40468376aaecdedc066291e2d8.png”>
+
+<img width="1279" alt="delta_io" src="https://delta.io/static/delta-hp-hero-bottom-46084c40468376aaecdedc066291e2d8.png">
 
 
 ## Purpose:
