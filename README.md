@@ -1,9 +1,11 @@
 # delta_optimizer
 Automated Optimization System for a Delta-based Lakehouse running on Spark or Photon
 
-%md
 
 # Delta Optimizer
+
+<img src=”https://delta.io/static/delta-hp-hero-bottom-46084c40468376aaecdedc066291e2d8.png”>
+
 
 ## Purpose:
 <p1> The Delta optimizer scrapes and analyzes the query history in DBSQL via the Query History API, as well as the Delta transaction logs on one or many databases, builds a data profile to determine the most important columns that each tables should be Z-ordered by. This aims to drastically reduce the amount of manual discovery and tuning users must do to properly optimize their delta tables, especially when the primary query interface is through a DBSQL Warehouse (as an analyst using SQL or a BI tool that auto-generates SQL). This is especially key when BI tools primarily pass auto-generated SQL to a DBSQL Warehouse, thus making it much more difficult to optimize tables manually at scale. </p1>
