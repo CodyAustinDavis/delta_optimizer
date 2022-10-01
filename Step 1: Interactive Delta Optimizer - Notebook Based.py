@@ -42,7 +42,7 @@ dbutils.widgets.dropdown("Query History Lookback Period (days)", defaultValue="3
 dbutils.widgets.text("SQL Warehouse Ids (csv list)", "")
 dbutils.widgets.text("Workspace DNS:", "")
 dbutils.widgets.text("Database Names (csv):", "")
-dbutils.widgets.dropdown("optimizeMethod", "Both", ["Reads", "Writes", "Both"])
+dbutils.widgets.dropdown("optimize_method", "both", ["read", "write", "both"])
 
 # COMMAND ----------
 
@@ -55,10 +55,10 @@ print(f"Loading Query Profile to delta from workspace: {workspaceName} from Ware
 
 ####### Step 1: Build Profile #######
 ## Initialize Profiler
-query_profiler = QueryProfiler(workspaceName, warehouseIdsList)
+#query_profiler = QueryProfiler(workspaceName, warehouseIdsList)
 
 
-query_profiler.build_query_history_profile( dbx_token = DBX_TOKEN, mode='auto', lookback_period_days=lookbackPeriod)
+#query_profiler.build_query_history_profile( dbx_token = DBX_TOKEN, mode='auto', lookback_period_days=lookbackPeriod)
 
 
 ####### Step 2: Build stats from transaction logs/table data #######
@@ -68,7 +68,7 @@ databases_raw = dbutils.widgets.get("Database Names (csv):")
 
 
 ## Initialize class and pass in database csv string
-profiler = DeltaProfiler(monitored_db_csv='default') ## examples include 'default', 'mydb1,mydb2', 'all' or leave blank
+profiler = DeltaProfiler( monitored_db_csv= databases_raw) ## examples include 'default', 'mydb1,mydb2', 'all' or leave blank
 
 ## Get tables
 profiler.get_all_tables_to_monitor()
@@ -84,10 +84,15 @@ profiler.build_cardinality_stats()
 
 
 ####### Step 3: Build Strategy and Rank #######
-optimize_method = dbutils.widgets.get("optimizeMethod")
+optimize_method = dbutils.widgets.get("optimize_method")
 
 ## Build Strategy
 delta_optimizer = DeltaOptimizer()
 
 delta_optimizer.build_optimization_strategy()
 
+
+# COMMAND ----------
+
+# DBTITLE 1,Return most up to date results!
+delta_optimizer.get_results().display()

@@ -37,7 +37,7 @@ delta_optimizer = DeltaOptimizer()
 # COMMAND ----------
 
 ## This table by default has only 1 file, so it shouldnt be expensive to collect
-config_row= delta_optimizer.get_results().collect()
+config_row = delta_optimizer.get_results().collect()
 
 # COMMAND ----------
 
@@ -98,4 +98,8 @@ for i in config_tbl_stats:
         
     except Exception as e:
         print(f"ANALYZE TABLE failed with error: {str(e)}\n")
+
+
+# COMMAND ----------
+
 

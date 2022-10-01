@@ -6,6 +6,7 @@ import re
 import os
 from datetime import datetime, timedelta, timezone
 from pyspark.sql import functions as F
+from pyspark.sql import Row
 from pyspark.sql.types import *
 from pyspark.sql import SparkSession
 
@@ -406,7 +407,7 @@ class QueryProfiler(DeltaOptimizerBase):
         ## Upon success of a query history pull, this function logs the start_ts and end_ts that it was pulled into the logs
 
         try: 
-            spark.sql(f"""INSERT INTO {self.database_name}.query_history_log (WarehouseIds, WorkspaceName, StartTimestamp, EndTimestamp)
+            self.spark.sql(f"""INSERT INTO {self.database_name}.query_history_log (WarehouseIds, WorkspaceName, StartTimestamp, EndTimestamp)
                                VALUES(split('{self.warehouse_ids}', ','), 
                                '{self.workspace_url}', ('{start_ts_ms}'::double/1000)::timestamp, 
                                ('{end_ts_ms}'::double/1000)::timestamp)
@@ -710,10 +711,10 @@ class DeltaProfiler(DeltaOptimizerBase):
             self.mode = 'subset'
             
         ## File size map
-        self.file_size_map = [{"max_table_size_gb": 8, "file_size": '16mb'},
-                 {"max_table_size_gb": 16, "file_size": '32mb'},
+        self.file_size_map = [{"max_table_size_gb": 8, "file_size": '64mb'},
+                 {"max_table_size_gb": 16, "file_size": '64mb'},
                  {"max_table_size_gb": 32, "file_size": '64mb'},
-                 {"max_table_size_gb": 64, "file_size": '128mb'},
+                 {"max_table_size_gb": 64, "file_size": '64mb'},
                  {"max_table_size_gb": 128, "file_size": '128mb'},
                  {"max_table_size_gb": 256, "file_size": '128mb'},
                  {"max_table_size_gb": 512, "file_size": '256mb'},
@@ -733,6 +734,10 @@ class DeltaProfiler(DeltaOptimizerBase):
         self.tbl_df = self.spark.sql("show tables in default like 'xxx_delta_optimizer'")
 
         return
+    
+    def get_db_list(self):
+      return self.db_list
+    
     
     ### Static methods / udfs
     @staticmethod
@@ -862,6 +867,8 @@ class DeltaProfiler(DeltaOptimizerBase):
                 WHEN MATCHED THEN UPDATE SET * 
                 WHEN NOT MATCHED THEN INSERT *
                 """)
+                
+                print(f"History analysis successful! (will be empty if no tables using predicates) You can see results here: SELECT * FROM {self.database_name}.write_statistics_merge_predicate")
 
             except Exception as e:
                 print(f"Skipping analysis for table {tbl} for error: {str(e)}")
@@ -955,8 +962,12 @@ class DeltaProfiler(DeltaOptimizerBase):
             CASE WHEN reads.QueryReferenceCount >= 1 THEN 1 ELSE 0 END AS IsUsedInReads,
             CASE WHEN writes.HasColumnInMergePredicate >= 1 THEN 1 ELSE 0 END AS IsUsedInWrites
             FROM {self.database_name}.all_tables_cardinality_stats AS spine
-            LEFT JOIN {self.database_name}.read_statistics_scaled_results reads ON spine.TableName = reads.TableName AND spine.ColumnName = reads.ColumnName
-            LEFT JOIN {self.database_name}.write_statistics_merge_predicate writes ON spine.TableName = writes.TableName AND spine.ColumnName = writes.ColumnName
+            LEFT JOIN {self.database_name}.read_statistics_scaled_results reads ON (CASE WHEN spine.TableName = reads.TableName THEN spine.TableName = reads.TableName
+                                                              ELSE (COALESCE(split(spine.TableName, '[.]')[1], split(spine.TableName, '[.]')[0]) = COALESCE(split(reads.TableName, '[.]')[1], split(reads.TableName, '[.]')[0])) 
+                                                              END ) AND spine.ColumnName = reads.ColumnName
+            LEFT JOIN {self.database_name}.write_statistics_merge_predicate writes ON (CASE WHEN spine.TableName = writes.TableName THEN spine.TableName = writes.TableName
+                                                              ELSE (COALESCE(split(spine.TableName, '[.]')[1], split(spine.TableName, '[.]')[0]) = COALESCE(split(writes.TableName, '[.]')[1], split(writes.TableName, '[.]')[0])) 
+                                                              END ) AND spine.ColumnName = writes.ColumnName
             )
         MERGE INTO {self.database_name}.all_tables_cardinality_stats AS target
         USING filter_cols AS source ON source.TableName = target.TableName AND source.ColumnName = target.ColumnName
@@ -1090,19 +1101,21 @@ class DeltaOptimizer(DeltaOptimizerBase):
     
     def build_optimization_strategy(self, optimize_method="both"):
         
+        optimize_method = optimize_method.lower()
+        
         print("Building Optimization Plan for Monitored Tables...")
         
         try:
             self.spark.sql(f"""INSERT INTO {self.database_name}.final_ranked_cols_by_table
          
             WITH most_recent_table_stats AS (
-            SELECT s1.*
+            SELECT DISTINCT s1.*
             FROM {self.database_name}.all_tables_table_stats s1
             WHERE UpdateTimestamp = (SELECT MAX(UpdateTimestamp) FROM {self.database_name}.all_tables_table_stats s2 WHERE s1.TableName = s2.TableName)
             ),
 
             final_stats AS (
-            SELECT
+            SELECT DISTINCT
             spine.*,
             CASE WHEN array_contains(tls.partitionColumns, spine.ColumnName) THEN 1 ELSE 0 END AS IsPartitionCol,
             QueryReferenceCountScaled,
@@ -1116,7 +1129,9 @@ class DeltaOptimizer(DeltaOptimizerBase):
             FROM {self.database_name}.all_tables_cardinality_stats AS spine
             LEFT JOIN most_recent_table_stats AS tls ON tls.TableName = spine.TableName /* !! not idempotent, always choose most recent table stats !! */
             -- These are re-created every run
-            LEFT JOIN {self.database_name}.read_statistics_scaled_results AS reads ON spine.TableName = reads.TableName AND spine.ColumnName = reads.ColumnName
+            LEFT JOIN {self.database_name}.read_statistics_scaled_results AS reads ON (CASE WHEN spine.TableName = reads.TableName THEN spine.TableName = reads.TableName
+                                                              ELSE (COALESCE(split(spine.TableName, '[.]')[1], split(spine.TableName, '[.]')[0]) = COALESCE(split(reads.TableName, '[.]')[1], split(reads.TableName, '[.]')[0])) 
+                                                              END ) AND spine.ColumnName = reads.ColumnName
             ),
             raw_scoring AS (
             -- THIS IS THE CORE SCORING EQUATION
@@ -1125,17 +1140,16 @@ class DeltaOptimizer(DeltaOptimizerBase):
              CASE WHEN IsPartitionCol = 1 THEN 0 
              ELSE 
                  CASE 
-                 WHEN '{optimize_method}' = 'Both'
+                 WHEN '{optimize_method}' = 'both'
                        THEN IsUsedInReads*(1 + COALESCE(QueryReferenceCountScaled,0) + COALESCE(RawTotalRuntimeScaled,0) + COALESCE(AvgQueryDurationScaled, 0) + COALESCE(TotalColumnOccurrencesForAllQueriesScaled, 0) + COALESCE(isUsedInFilter,0) + COALESCE(isUsedInJoin,0) + COALESCE(isUsedInGroup, 0))*(0.001+ COALESCE(CardinalityProportionScaled,0)) + (IsUsedInWrites*(0.001+COALESCE(CardinalityProportionScaled, 0)))
-                 WHEN '{optimize_method}' = 'Read'
+                 WHEN '{optimize_method}' = 'read'
                        THEN IsUsedInReads*(1 + COALESCE(QueryReferenceCountScaled,0) + COALESCE(RawTotalRuntimeScaled,0) + COALESCE(AvgQueryDurationScaled, 0) + COALESCE(TotalColumnOccurrencesForAllQueriesScaled, 0) + COALESCE(isUsedInFilter,0) + COALESCE(isUsedInJoin,0) + COALESCE(isUsedInGroup, 0))*(0.001+ COALESCE(CardinalityProportionScaled,0)) /* If Read, do not add merge predicate to score */
-                WHEN '{optimize_method}' = 'Write'
+                WHEN '{optimize_method}' = 'write'
                         THEN IsUsedInReads*(1 + COALESCE(QueryReferenceCountScaled,0) + COALESCE(RawTotalRuntimeScaled,0) + COALESCE(AvgQueryDurationScaled, 0) + COALESCE(TotalColumnOccurrencesForAllQueriesScaled, 0) + COALESCE(isUsedInFilter,0) + COALESCE(isUsedInJoin,0) + COALESCE(isUsedInGroup, 0))*(0.001+ COALESCE(CardinalityProportionScaled,0)) + (5*IsUsedInWrites*(0.001+COALESCE(CardinalityProportionScaled, 0))) /* heavily weight the column such that it is always included */
                 END
             END AS RawScore
             FROM final_stats
             ),
-            -- Add cardinality in here somehow
             ranked_scores AS (
             SELECT 
             *,
@@ -1143,12 +1157,13 @@ class DeltaOptimizer(DeltaOptimizerBase):
             FROM raw_scoring
             )
 
-            SELECT 
+            SELECT DISTINCT
             *,
             current_timestamp() AS RankUpdateTimestamp /* not going to replace results each time, let optimizer choose most recent version and look at how it changes */
             FROM ranked_scores
-            WHERE (ColumnRank <= 3::integer AND (IsUsedInReads + IsUsedInWrites) >= 1 AND DistinctCountOfColumnInSample >= 1000) /* 3 or less but must be high enough cardinality */
-            OR (CardinalityProportion >= 0.2 AND RawScore IS NOT NULL) -- filter out max ZORDER cols, we will then collect list into OPTIMIZE string to run
+            WHERE (ColumnRank <= 2::integer AND (IsUsedInReads + IsUsedInWrites) >= 1 AND DistinctCountOfColumnInSample >= 1000) /* 2 or less but must be high enough cardinality */
+            OR (CardinalityProportion >= 0.2 AND RawScore IS NOT NULL AND DistinctCountOfColumnInSample >= 1000) -- filter out max ZORDER cols, we will then collect list into OPTIMIZE string to run
+            OR (CardinalityProportion >= 0.01 AND TotalCountInSample >= 1000000 AND RawScore IS NOT NULL AND (IsUsedInReads + IsUsedInWrites) >= 1)
             ORDER BY TableName, ColumnRank
     
             """)
@@ -1160,29 +1175,35 @@ class DeltaOptimizer(DeltaOptimizerBase):
             print(f"Now building final config file...")
 
             final_df = (self.spark.sql(f"""
-                WITH final_results AS (
-                SELECT s1.*
-                FROM {self.database_name}.final_ranked_cols_by_table s1
-                WHERE RankUpdateTimestamp = (SELECT MAX(RankUpdateTimestamp) FROM {self.database_name}.final_ranked_cols_by_table s2 
-                                                                    WHERE s1.TableName = s2.TableName)
-                ),
-                  tt AS 
-                          (
-                              SELECT 
-                              TableName, collect_list(ColumnName) AS ZorderCols
-                              FROM final_results
-                              GROUP BY TableName
-                          )
-                          SELECT 
-                          *,
-                          CASE WHEN size(ZorderCols) >=1 
-                                  THEN concat("OPTIMIZE ", TableName, " ZORDER BY (", concat_ws(", ",ZorderCols), ");")
-                              ELSE concat("OPTIMIZE ", TableName, ";")
-                              END AS OptimizeCommandString,
-                          NULL AS AlterTableCommandString,
-                          NULL AS AnalyzeTableCommandString,
-                          current_timestamp() AS UpdateTimestamp
-                          FROM tt
+                         WITH most_recent_table_stats AS (
+                                  SELECT DISTINCT s1.*
+                                  FROM {self.database_name}.all_tables_table_stats s1
+                                  WHERE UpdateTimestamp = (SELECT MAX(UpdateTimestamp) FROM {self.database_name}.all_tables_table_stats s2 WHERE s1.TableName = s2.TableName)
+                                  ),
+
+                        final_results AS (
+                                      SELECT DISTINCT spine.TableName, s1.ColumnName
+                                      FROM most_recent_table_stats spine
+                                      LEFT JOIN {self.database_name}.final_ranked_cols_by_table s1 ON spine.TableName = s1.TableName AND RankUpdateTimestamp = (SELECT MAX(RankUpdateTimestamp) FROM {self.database_name}.final_ranked_cols_by_table s2)
+
+                                      ),
+                                        tt AS 
+                                                (
+                                                    SELECT 
+                                                    TableName, collect_list(DISTINCT ColumnName) AS ZorderCols
+                                                    FROM final_results
+                                                    GROUP BY TableName
+                                                )
+                                                SELECT 
+                                                *,
+                                                CASE WHEN size(ZorderCols) >=1 
+                                                        THEN concat("OPTIMIZE ", TableName, " ZORDER BY (", concat_ws(", ",ZorderCols), ");")
+                                                    ELSE concat("OPTIMIZE ", TableName, ";")
+                                                    END AS OptimizeCommandString,
+                                                NULL AS AlterTableCommandString,
+                                                NULL AS AnalyzeTableCommandString,
+                                                current_timestamp() AS UpdateTimestamp
+                                                FROM tt
                         """)
              )
 
@@ -1275,7 +1296,7 @@ class DeltaOptimizer(DeltaOptimizerBase):
          WITH final_results AS (
             SELECT s1.*
             FROM {self.database_name}.final_optimize_config s1
-            WHERE UpdateTimestamp = (SELECT MAX(UpdateTimestamp) FROM {self.database_name}.final_optimize_config s2 WHERE s1.TableName = s2.TableName)
+            WHERE UpdateTimestamp = (SELECT MAX(UpdateTimestamp) FROM {self.database_name}.final_optimize_config s2)
             )
         SELECT * FROM final_results;
         """))
