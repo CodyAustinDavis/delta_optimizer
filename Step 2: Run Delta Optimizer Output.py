@@ -19,8 +19,9 @@
 # MAGIC ### Run Commands in Particular Order:
 # MAGIC 
 # MAGIC <li> 1. ALTER TABLE
-# MAGIC <li> 2. OPTIMIZE TABLE
-# MAGIC <li> 3. ANALYZE TABLE
+# MAGIC <li> 2. Column Reordering
+# MAGIC <li> 3. OPTIMIZE TABLE
+# MAGIC <li> 4. ANALYZE TABLE
 
 # COMMAND ----------
 
@@ -57,6 +58,22 @@ for i in config_tbl_prop:
         
     except Exception as e:
         print(f"TABLE PROPERTIES failed with error: {str(e)}\n")
+
+# COMMAND ----------
+
+# DBTITLE 1,Move Z-Order columns to front
+col_list = config_tbl_prop = [i[5] for i in config_row]
+
+### This is a recursive step, ordering needs to happend one at a time
+## Starting simple, just moving ZORDEr cols to front, but this can become more nuanced
+for i in col_list:
+  for j in i:
+    try: 
+      spark.sql(j)
+      
+    except Exception as e:
+      print(f"Unable to change order (usually means cause its an Id column and doesnt need reordering anyways...skipping to next columns) \n with error: {str(e)} \n ")
+      
 
 # COMMAND ----------
 

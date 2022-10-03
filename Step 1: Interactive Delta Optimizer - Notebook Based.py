@@ -46,12 +46,11 @@ dbutils.widgets.dropdown("optimize_method", "both", ["read", "write", "both"])
 
 # COMMAND ----------
 
-# DBTITLE 1,Run Delta Optimizer
+# DBTITLE 1,Run Delta Optimizer - Input above params first
 lookbackPeriod = int(dbutils.widgets.get("Query History Lookback Period (days)"))
 warehouseIdsList = [i.strip() for i in dbutils.widgets.get("SQL Warehouse Ids (csv list)").split(",")]
 workspaceName = dbutils.widgets.get("Workspace DNS:").strip()
 warehouse_ids = dbutils.widgets.get("SQL Warehouse Ids (csv list)")
-print(f"Loading Query Profile to delta from workspace: {workspaceName} from Warehouse Ids: {warehouseIdsList} for the last {lookbackPeriod} days...")
 
 ####### Step 1: Build Profile #######
 ## Initialize Profiler
@@ -95,4 +94,8 @@ delta_optimizer.build_optimization_strategy()
 # COMMAND ----------
 
 # DBTITLE 1,Return most up to date results!
-delta_optimizer.get_results().display()
+df = delta_optimizer.get_results()
+
+# COMMAND ----------
+
+df.display()

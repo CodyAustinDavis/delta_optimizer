@@ -67,7 +67,7 @@ class DeltaOptimizerBase():
                 NumberOfQueriesUsedInJoin LONG,
                 NumberOfQueriesUsedInFilter LONG,
                 NumberOfQueriesUsedInGroup LONG,
-                QueryRefereneCount LONG,
+                QueryReferenceCount LONG,
                 RawTotalRuntime DOUBLE,
                 AvgQueryDuration DOUBLE,
                 TotalColumnOccurrencesForAllQueries LONG,
@@ -89,7 +89,7 @@ class DeltaOptimizerBase():
                 NumberOfQueriesUsedInJoin LONG,
                 NumberOfQueriesUsedInFilter LONG,
                 NumberOfQueriesUsedInGroup LONG,
-                QueryRefereneCount LONG,
+                QueryReferenceCount LONG,
                 RawTotalRuntime DOUBLE,
                 AvgQueryDuration DOUBLE,
                 TotalColumnOccurrencesForAllQueries LONG,
@@ -193,7 +193,8 @@ class DeltaOptimizerBase():
                 ZorderCols ARRAY<STRING>,
                 OptimizeCommandString STRING, --OPTIMIZE OPTIONAL < ZORDER BY >
                 AlterTableCommandString STRING, --delta.targetFileSize, delta.tuneFileSizesForRewrites
-                AnalyzeTableCommandString STRING -- ANALYZE TABLE COMPUTE STATISTICS
+                AnalyzeTableCommandString STRING, -- ANALYZE TABLE COMPUTE STATISTICS
+                ColumnOrderingCommandString ARRAY<STRING>
                 )
                 USING DELTA
         """)
@@ -213,10 +214,18 @@ class DeltaOptimizerBase():
             
         print(f"Database: {self.database_name} successfully Truncated!")
         return
+      
+    def drop_delta_optimizer(self):
+        
+        print(f"Truncating database (and all tables within): {self.database_name}...")
+        df = self.spark.sql(f"""SHOW TABLES IN {self.database_name}""").filter(F.col("database") == F.lit(self.database_name)).select("tableName").collect()
+
+        self.spark.sql(f"""DROP DATABASE {self.database_name} CASCADE;""")
+        
+        return
     
     ## Add functions to truncate or remove tables
     
-        ## Add functions to truncate or remove tables
     def vacuum_optimizer_tables(self):
         
         print(f"vacuuming tables database (and all tables within): {self.database_name}...")
@@ -363,6 +372,7 @@ class QueryProfiler(DeltaOptimizerBase):
     @staticmethod
     def ms_timestamp(dt):
         return int(round(dt.replace(tzinfo=timezone.utc).timestamp() * 1000, 0))
+    
     
     
     ## Get Start and End range for Query History API
@@ -1096,8 +1106,21 @@ class DeltaOptimizer(DeltaOptimizerBase):
         else: 
             alterExpr = f"ALTER TABLE {inputTableName} SET TBLPROPERTIES ('delta.targetFileSize' = '{fileSizeMapInMb}', 'delta.tuneFileSizesForRewrites' = 'false');"
             return alterExpr
-        
-        
+    
+    
+    @staticmethod
+    @F.udf("array<string>")
+    def get_column_ordering_statements(table_name, zorder_cols:list[str]):
+
+      alter_list = []
+
+      for c in zorder_cols:
+        ac_element = str(f"""ALTER TABLE {table_name} ALTER COLUMN {c} FIRST;""")
+        alter_list.append(ac_element)
+
+      return alter_list
+      
+          
     
     def build_optimization_strategy(self, optimize_method="both"):
         
@@ -1213,6 +1236,26 @@ class DeltaOptimizer(DeltaOptimizerBase):
 
             #### Build Analyze Table String
 
+            col_order_df = (self.spark.sql(f"""WITH final_results AS (
+                                      SELECT s1.*
+                                      FROM {self.database_name}.final_optimize_config s1
+                                      WHERE UpdateTimestamp = (SELECT MAX(UpdateTimestamp) FROM {self.database_name}.final_optimize_config s2 WHERE s1.TableName = s2.TableName)
+                                      
+                                      )
+                                      SELECT * FROM final_results""")
+                            .withColumn("ColumnOrderingCommandString", self.get_column_ordering_statements(F.col("TableName"), F.col("ZorderCols")))
+                           )
+            
+            col_order_df.createOrReplaceTempView("col_order")
+            
+            self.spark.sql(f"""MERGE INTO {self.database_name}.final_optimize_config AS target
+                            USING col_order AS source
+                            ON source.TableName = target.TableName
+                            WHEN MATCHED THEN 
+                            UPDATE SET 
+                            target.ColumnOrderingCommandString = source.ColumnOrderingCommandString
+                      """)
+                            
             ## Build an ANALYZE TABLE command with the following heuristics: 
 
             ## 1. IF: table less than 100GB Run COMPUTE STATISTICS FOR ALL COLUMNS
