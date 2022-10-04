@@ -116,7 +116,3 @@ for i in config_tbl_stats:
     except Exception as e:
         print(f"ANALYZE TABLE failed with error: {str(e)}\n")
 
-
-# COMMAND ----------
-
-

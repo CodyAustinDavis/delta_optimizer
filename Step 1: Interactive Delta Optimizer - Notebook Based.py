@@ -54,10 +54,9 @@ warehouse_ids = dbutils.widgets.get("SQL Warehouse Ids (csv list)")
 
 ####### Step 1: Build Profile #######
 ## Initialize Profiler
-#query_profiler = QueryProfiler(workspaceName, warehouseIdsList)
+query_profiler = QueryProfiler(workspaceName, warehouseIdsList)
 
-
-#query_profiler.build_query_history_profile( dbx_token = DBX_TOKEN, mode='auto', lookback_period_days=lookbackPeriod)
+query_profiler.build_query_history_profile( dbx_token = DBX_TOKEN, mode='auto', lookback_period_days=lookbackPeriod)
 
 
 ####### Step 2: Build stats from transaction logs/table data #######
