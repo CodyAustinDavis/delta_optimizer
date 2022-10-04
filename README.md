@@ -21,7 +21,7 @@ Automated Optimization System for a Delta-based Lakehouse running on Spark or Ph
 #### General Roadmap: 
 
 <li> 1. Separate optimization rules from code logic to make rules configurable
-<li> 2. Add option to run for user or simply provide a DBSQL Dashboard to make suggestions OOTB
+<li> 2. Add option to run for user or simply provide a DBSQL Dashboard of recommendations to make suggestions OOTB
 <li> 3. Add table exception rules, allow users to decide which table to auto optimize and which to manually override if they want to optimize their own
 <li> 4. Dynamically figure out job configuration (cluster size / periodicity) of commands to run
   
@@ -34,15 +34,14 @@ Automated Optimization System for a Delta-based Lakehouse running on Spark or Ph
 #### Transaction Log Statistics: 
 
 <li> 1. Add partition filtering and file size management - <b> DONE </b>
-<li> 2. Column Reording first 32 - <b> IN PROGRESS </b>  
+<li> 2. Column Reording first 32 (currently only re-orders recommended ZORDER columns) - <b> IN PROGRESS </b>  
 <li> 3. Add Analyze Table STATS - <b> DONE </b>  
 
 #### Ranking Statistics Algorithm:
 
 <li> 1. More robust standard scaling for statistics (right now its 0-1 standard scaling partitioned by TABLE)
-<li> 2. Standard scale Cardinality metric to weight rank in scaling (higher cardinality should get weighted more even if slightly lower on runtime/occurence)
-<li> 3. Make ranking system more intelligent - open ended feedback needed for ideas on making ranking system more generalizable and nuanced
-<li> 4. Dynamically prune for the actual number of ZORDER columns to best used (dependant first on cardinality). Do this possibly by tracking distance between certain statistics (i.e. if ColA appears 3000 times and Col B appears 2900 times, use both, but if ColA appears 3000 times but ColB appears 3 times, only use ColA)
+<li> 2. Make ranking system more intelligent - open ended feedback needed for ideas on making ranking system more generalizable and nuanced
+<li> 3. Dynamically prune for the actual number of ZORDER columns to best used (dependant first on cardinality). Do this possibly by tracking distance between certain statistics (i.e. if ColA appears 3000 times and Col B appears 2900 times, use both, but if ColA appears 3000 times but ColB appears 3 times, only use ColA)
 
 </li>
 

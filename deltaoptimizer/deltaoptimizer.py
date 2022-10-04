@@ -11,6 +11,21 @@ from pyspark.sql.types import *
 from pyspark.sql import SparkSession
 
 
+##################################################################
+""" 
+Name: Delta Optimizer
+Author: Cody Austin Davis
+Date: 9/20/2022
+
+Overview: This file provides 4 Main Classes: 
+
+1. DeltaOptimizerBase - This class is just for initializing a delta optimizer database independently and performing maintanence commands on the DB
+2. Query Profiler - This class initializes a delta optimizer DB and builds a query profile on one or many DBSQL Warehouses. It can be incremental.
+3. Delta Profiler - This class monitors the Delta logs of one or many Databases to profile table metadata such as: file size, table size, operation predicates, etc.
+4. Delta Optimizer - This class combines the results (if any, you do not NEED to run both), into a cohesive strategy for monitored tables and saves into a config file. 
+"""
+##################################################################
+
 class DeltaOptimizerBase():
     
     def __init__(self, database_name="delta_optimizer"):
