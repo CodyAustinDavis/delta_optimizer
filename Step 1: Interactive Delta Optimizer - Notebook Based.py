@@ -32,7 +32,7 @@ from deltaoptimizer.deltaoptimizer import DeltaProfiler, QueryProfiler, DeltaOpt
 
 # DBTITLE 1,Register and Retrieve DBX Auth Token
 import os
-DBX_TOKEN = os.environ.get("DBX_TOKEN")
+DBX_TOKEN = "dapi87530dc3f4f04da1a4363188314e4162"
 
 # COMMAND ----------
 
@@ -46,19 +46,23 @@ dbutils.widgets.dropdown("optimize_method", "both", ["read", "write", "both"])
 
 # COMMAND ----------
 
-# DBTITLE 1,Run Delta Optimizer - Input above params first
 lookbackPeriod = int(dbutils.widgets.get("Query History Lookback Period (days)"))
 warehouseIdsList = [i.strip() for i in dbutils.widgets.get("SQL Warehouse Ids (csv list)").split(",")]
 workspaceName = dbutils.widgets.get("Workspace DNS:").strip()
 warehouse_ids = dbutils.widgets.get("SQL Warehouse Ids (csv list)")
 
+# COMMAND ----------
+
+# DBTITLE 1,Build Query History Profile
 ####### Step 1: Build Profile #######
 ## Initialize Profiler
 query_profiler = QueryProfiler(workspaceName, warehouseIdsList)
 
-query_profiler.build_query_history_profile( dbx_token = DBX_TOKEN, mode='auto', lookback_period_days=lookbackPeriod)
+query_profiler.build_query_history_profile( dbx_token = DBX_TOKEN, mode='manual', lookback_period_days=lookbackPeriod)
 
+# COMMAND ----------
 
+# DBTITLE 1,Run Delta Profiler
 ####### Step 2: Build stats from transaction logs/table data #######
 
 ## Assume running on Databricks notebooks if not imported
@@ -81,9 +85,10 @@ profiler.build_all_tables_stats()
 profiler.build_cardinality_stats()
 
 
-####### Step 3: Build Strategy and Rank #######
-optimize_method = dbutils.widgets.get("optimize_method")
+# COMMAND ----------
 
+# DBTITLE 1,Run Delta Optimizer
+####### Step 3: Build Strategy and Rank #######
 ## Build Strategy
 delta_optimizer = DeltaOptimizer()
 

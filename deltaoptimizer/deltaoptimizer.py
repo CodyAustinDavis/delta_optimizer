@@ -346,43 +346,72 @@ class QueryProfiler(DeltaOptimizerBase):
         try: 
             results = Parser(sqlString)
 
+            ## Can be a fully qualified table name or just a column name
             ## If just a select, then skip this and just return the table
             if columnName in results.columns_dict.get("join"):
                 return 1
+            elif columnName.split(".")[-1] in results.columns_dict.get("join"):
+                return 1
+
             else:
-                return 0
-        except:
+                co = results.columns_dict
+                co["error_col"] = columnName
+                return str(co)
+
+        except Exception as e:
+            st_err = str(e)
+            ### Eventually we want to be able to return this be return the full json instead of just a 0 or 1
             return 0
 
-
+          
     @staticmethod
     @F.udf("integer")
     def checkIfFilterColumn(sqlString, columnName):
         try: 
             results = Parser(sqlString)
 
+            ## Can be a fully qualified table name or just a column name
             ## If just a select, then skip this and just return the table
             if columnName in results.columns_dict.get("where"):
                 return 1
-            else:
-                return 0
-        except:
-            return 0
+            elif columnName.split(".")[-1] in results.columns_dict.get("where"):
+                return 1
 
+            else:
+                co = results.columns_dict
+                co["error_col"] = columnName
+                return str(co)
+
+        except Exception as e:
+            st_err = str(e)
+            ### Eventually we want to be able to return this be return the full json instead of just a 0 or 1
+            return 0
+          
+          
     @staticmethod
     @F.udf("integer")
     def checkIfGroupColumn(sqlString, columnName):
         try: 
             results = Parser(sqlString)
 
+            ## Can be a fully qualified table name or just a column name
             ## If just a select, then skip this and just return the table
             if columnName in results.columns_dict.get("group_by"):
                 return 1
+            elif columnName.split(".")[-1] in results.columns_dict.get("group_by"):
+                return 1
+
             else:
-                return 0
-        except:
+                co = results.columns_dict
+                co["error_col"] = columnName
+                return str(co)
+
+        except Exception as e:
+            st_err = str(e)
+            ### Eventually we want to be able to return this be return the full json instead of just a 0 or 1
             return 0
 
+          
     ## Convert timestamp to milliseconds for API
     @staticmethod
     def ms_timestamp(dt):
@@ -558,7 +587,7 @@ class QueryProfiler(DeltaOptimizerBase):
                         rows_produced,
                         metrics
                         FROM raw
-                        WHERE statement_type = 'SELECT';
+                        WHERE statement_type IN ('SELECT', 'INSERT', 'REPLACE');
                         """)
             
             ## If successfull, insert log
@@ -579,7 +608,7 @@ class QueryProfiler(DeltaOptimizerBase):
                     AVG(duration)*COUNT(*) AS DurationTimesRuns
                     FROM {self.database_name}.raw_query_history_statistics
                     WHERE status IN('FINISHED', 'CANCELED')
-                    AND statement_type = 'SELECT'
+                    AND statement_type IN ('SELECT', 'INSERT', 'REPLACE')
                     GROUP BY query_id
                   )
                   SELECT 
