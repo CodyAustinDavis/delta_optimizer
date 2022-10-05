@@ -32,7 +32,7 @@ from deltaoptimizer.deltaoptimizer import DeltaProfiler, QueryProfiler, DeltaOpt
 
 # DBTITLE 1,Register and Retrieve DBX Auth Token
 import os
-DBX_TOKEN = "dapi87530dc3f4f04da1a4363188314e4162"
+DBX_TOKEN = os.environ.get("DBX_TOKEN")
 
 # COMMAND ----------
 
