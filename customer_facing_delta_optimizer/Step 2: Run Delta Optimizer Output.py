@@ -135,7 +135,7 @@ for i in config_optim:
 ## This table by default has only 1 file, so it shouldnt be expensive to collect
 config_tbl_stats = [i[4] for i in config_row]
 
-print(f"Running {len(config_tbl_stats)} TBL PROPERTIES (file size and re-writes) commands: \n {config_tbl_stats}")
+print(f"Running {len(config_tbl_stats)} ANALYZE TABLE commands: \n {config_tbl_stats}")
 
 # COMMAND ----------
 
