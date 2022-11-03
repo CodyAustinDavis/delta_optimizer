@@ -92,10 +92,6 @@ for i in config_tbl_prop:
 
 # COMMAND ----------
 
-print(col_list)
-
-# COMMAND ----------
-
 # DBTITLE 1,Move Z-Order columns to front
 col_list = config_tbl_prop = [i[5] for i in config_row]
 
