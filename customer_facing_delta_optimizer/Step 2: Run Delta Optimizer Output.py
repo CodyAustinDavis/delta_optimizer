@@ -32,15 +32,11 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -r deltaoptimizer/requirements.txt
-
-# COMMAND ----------
-
 from pyspark.sql.functions import *
 
 # COMMAND ----------
 
-from deltaoptimizer.deltaoptimizer import DeltaOptimizerBase, DeltaProfiler, QueryProfiler, DeltaOptimizer
+from deltaoptimizer import DeltaOptimizerBase, DeltaProfiler, QueryProfiler, DeltaOptimizer
 
 # COMMAND ----------
 

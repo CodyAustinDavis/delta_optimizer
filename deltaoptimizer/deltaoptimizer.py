@@ -624,6 +624,7 @@ class QueryProfiler(DeltaOptimizerBase):
                     )
 
             df_profiled.createOrReplaceTempView("new_parsed")
+            
             self.spark.sql(f"""
                 MERGE INTO {self.database_name}.parsed_distinct_queries AS target
                 USING new_parsed AS source
@@ -649,7 +650,7 @@ class QueryProfiler(DeltaOptimizerBase):
                   root.query_text,
                   hist.*
                   FROM exploded_parsed_cols AS root
-                  LEFT JOIN {self.database_name}.query_summary_statistics AS hist USING (query_id)--SELECT statements only included
+                  LEFT JOIN {self.database_name}.query_summary_statistics AS hist ON root.query_id = hist.query_id --SELECT statements only included
                   )
 
                   SELECT *,
@@ -696,7 +697,23 @@ class QueryProfiler(DeltaOptimizerBase):
                         WHERE length(ColumnName) >=1
                         GROUP BY TableName, ColumnName
                     )
-                    SELECT * FROM step_2
+                    SELECT
+                    CONCAT(COALESCE(REVERSE(SPLIT(spine.TableName, '[.]'))[2], 'hive_metastore'), 
+                    '.', COALESCE(REVERSE(SPLIT(spine.TableName, '[.]'))[1], 'default'), 
+                    '.', REVERSE(SPLIT(spine.TableName, '[.]'))[0]) AS TableName,
+                    ColumnName,
+                    isUsedInJoin,
+                    isUsedInFilter,
+                    isUsedInGroup,
+                    NumberOfQueriesUsedInJoin,
+                    NumberOfQueriesUsedInFilter,
+                    NumberOfQueriesUsedInGroup,
+                    QueryReferenceCount,
+                    RawTotalRuntime,
+                    AvgQueryDuration,
+                    TotalColumnOccurrencesForAllQueries,
+                    AvgColumnOccurrencesInQueryies
+                    FROM step_2 AS spine
                     ; """)
 
 
@@ -820,6 +837,7 @@ class DeltaProfiler(DeltaOptimizerBase):
     def get_all_tables_to_monitor(self):
         
         try:
+          ## Need to add catalog level loop
             #Loop through all databases
             for db in self.spark.sql("""show databases""").filter(F.col("databaseName").isin(self.db_list)).collect():
               #create a dataframe with list of tables from the database
@@ -838,6 +856,7 @@ class DeltaProfiler(DeltaOptimizerBase):
 
             self.tbl_df.createOrReplaceTempView("all_tables")
 
+            ## Need to add catalog level, for now, make this handled in the joins in the strategy level
             df_tables = self.spark.sql("""
             SELECT 
             concat(database, '.', tableName) AS fully_qualified_table_name
@@ -920,7 +939,8 @@ class DeltaProfiler(DeltaOptimizerBase):
                 ON source.TableName = target.TableName AND source.ColumnName = target.ColumnName
                 WHEN MATCHED THEN UPDATE SET * 
                 WHEN NOT MATCHED THEN INSERT *
-                """)
+                """
+                              )
                 
                 print(f"History analysis successful! (will be empty if no tables using predicates) You can see results here: SELECT * FROM {self.database_name}.write_statistics_merge_predicate")
 
@@ -951,9 +971,18 @@ class DeltaProfiler(DeltaOptimizerBase):
 
                 ## This needs to be re-worked
                 self.spark.sql(f"""INSERT INTO {self.database_name}.all_tables_cardinality_stats
-                SELECT TableName, ColumnName, NULL, NULL, NULL, NULL, NULL, NULL, NULL, current_timestamp() FROM df_cols AS source
+                SELECT CONCAT(COALESCE(REVERSE(SPLIT(source.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(source.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(source.TableName, '[.]'))[0]) AS TableName, 
+                      ColumnName, NULL, NULL, NULL, NULL, NULL, NULL, NULL, current_timestamp() FROM df_cols AS source
                 WHERE NOT EXISTS (SELECT 1 FROM {self.database_name}.all_tables_cardinality_stats ss 
-                                  WHERE ss.TableName = source.TableName AND ss.ColumnName = source.ColumnName)
+                                  WHERE (CONCAT(COALESCE(REVERSE(SPLIT(ss.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(ss.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(ss.TableName, '[.]'))[0])) = 
+                            
+                            (CONCAT(COALESCE(REVERSE(SPLIT(source.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(source.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(source.TableName, '[.]'))[0])) AND ss.ColumnName = source.ColumnName)
                 """)
 
             except Exception as e:
@@ -964,27 +993,35 @@ class DeltaProfiler(DeltaOptimizerBase):
 
 
             try: 
+              
+              ## For some reason, DESCRIBE DETAIL likes to use spark_catalog instead of the hive_metastore, which nothing else does
                 table_df = (self.spark.sql(f"""DESCRIBE DETAIL {tbl}""")
-                    .selectExpr("name", "sizeInBytes", "sizeInBytes/(1024*1024*1024) AS sizeInGB", "partitionColumns")
+                    .selectExpr("replace(name, 'spark_catalog', 'hive_metastore') AS name", 
+                                "sizeInBytes", "sizeInBytes/(1024*1024*1024) AS sizeInGB", 
+                                "partitionColumns")
                             )
 
                 table_df.createOrReplaceTempView("table_core")
                 self.file_size_df.createOrReplaceTempView("file_size_map")
 
                 ## !!! Not idempotent, must choose must recent version to work off of
+                ## Map to file size mapping config
+                
                 self.spark.sql(f"""
                 WITH ss AS (
                     SELECT 
                     spine.*,
                     file_size AS mapped_file_size,
                     ROW_NUMBER() OVER (PARTITION BY name ORDER BY max_table_size_gb) AS SizeRank
-                    FROM table_core AS spine
+                    FROM table_core AS spine 
                     LEFT JOIN file_size_map AS fs ON spine.sizeInGB::integer <= fs.max_table_size_gb::integer
                     )
                     -- Pick smaller file size config by table size
                     INSERT INTO {self.database_name}.all_tables_table_stats
                     SELECT
-                    name::string AS TableName, 
+                    CONCAT(COALESCE(REVERSE(SPLIT(name::string, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(name::string, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(name::string, '[.]'))[0]) AS TableName, 
                     sizeInBytes::float AS sizeInBytes,
                     sizeInGB::float AS sizeInGB,
                     partitionColumns::array<string> AS partitionColumns,
@@ -1002,6 +1039,7 @@ class DeltaProfiler(DeltaOptimizerBase):
         print("Optimizing final tables to prepare to strategy ranking...")
         self.spark.sql(f"""OPTIMIZE {self.database_name}.all_tables_cardinality_stats""")
         self.spark.sql(f"""OPTIMIZE {self.database_name}.all_tables_table_stats""")
+        
         return
     
     
@@ -1011,20 +1049,32 @@ class DeltaProfiler(DeltaOptimizerBase):
         ## Check and see which tables/columns you even need to build statements for
         self.spark.sql(f"""WITH filter_cols AS (
             SELECT DISTINCT
-            spine.TableName,
+            spine.FullTableName AS TableName,
             spine.ColumnName,
             CASE WHEN reads.QueryReferenceCount >= 1 THEN 1 ELSE 0 END AS IsUsedInReads,
             CASE WHEN writes.HasColumnInMergePredicate >= 1 THEN 1 ELSE 0 END AS IsUsedInWrites
-            FROM {self.database_name}.all_tables_cardinality_stats AS spine
-            LEFT JOIN {self.database_name}.read_statistics_scaled_results reads ON (CASE WHEN spine.TableName = reads.TableName THEN spine.TableName = reads.TableName
-                                                              ELSE (COALESCE(split(spine.TableName, '[.]')[1], split(spine.TableName, '[.]')[0]) = COALESCE(split(reads.TableName, '[.]')[1], split(reads.TableName, '[.]')[0])) 
-                                                              END ) AND spine.ColumnName = reads.ColumnName
-            LEFT JOIN {self.database_name}.write_statistics_merge_predicate writes ON (CASE WHEN spine.TableName = writes.TableName THEN spine.TableName = writes.TableName
-                                                              ELSE (COALESCE(split(spine.TableName, '[.]')[1], split(spine.TableName, '[.]')[0]) = COALESCE(split(writes.TableName, '[.]')[1], split(writes.TableName, '[.]')[0])) 
-                                                              END ) AND spine.ColumnName = writes.ColumnName
+            FROM (SELECT 
+                  CONCAT(COALESCE(REVERSE(SPLIT(s.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(s.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(s.TableName, '[.]'))[0]) AS FullTableName, * 
+                 FROM {self.database_name}.all_tables_cardinality_stats s) AS spine
+            LEFT JOIN (SELECT 
+            CONCAT(COALESCE(REVERSE(SPLIT(s.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(s.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(s.TableName, '[.]'))[0]) AS FullTableName, *
+                            FROM {self.database_name}.read_statistics_scaled_results AS s) AS reads 
+                     ON spine.FullTableName = reads.FullTableName 
+                        AND spine.ColumnName = reads.ColumnName
+            LEFT JOIN (SELECT
+            CONCAT(COALESCE(REVERSE(SPLIT(w.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(w.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(w.TableName, '[.]'))[0]) AS FullTableName, *
+                            FROM {self.database_name}.write_statistics_merge_predicate AS w) AS writes ON spine.FullTableName = writes.FullTableName
+                                        AND spine.ColumnName = writes.ColumnName
             )
+            
         MERGE INTO {self.database_name}.all_tables_cardinality_stats AS target
-        USING filter_cols AS source ON source.TableName = target.TableName AND source.ColumnName = target.ColumnName
+        USING filter_cols AS source ON source.TableName = target.TableName AND source.ColumnName = target.ColumnName --this table name is already made FullTableName
         WHEN MATCHED THEN UPDATE SET
         target.IsUsedInReads = source.IsUsedInReads,
         target.IsUsedInWrites = source.IsUsedInWrites
@@ -1154,7 +1204,7 @@ class DeltaOptimizer(DeltaOptimizerBase):
     
     @staticmethod
     @F.udf("array<string>")
-    def get_column_ordering_statements(table_name, zorder_cols:list[str]):
+    def get_column_ordering_statements(table_name, zorder_cols):
 
       alter_list = []
 
@@ -1175,15 +1225,26 @@ class DeltaOptimizer(DeltaOptimizerBase):
         try:
             self.spark.sql(f"""INSERT INTO {self.database_name}.final_ranked_cols_by_table
          
-            WITH most_recent_table_stats AS (
-            SELECT DISTINCT s1.*
-            FROM {self.database_name}.all_tables_table_stats s1
-            WHERE UpdateTimestamp = (SELECT MAX(UpdateTimestamp) FROM {self.database_name}.all_tables_table_stats s2 WHERE s1.TableName = s2.TableName)
-            ),
-
-            final_stats AS (
-            SELECT DISTINCT
-            spine.*,
+              WITH most_recent_table_stats AS (
+                        SELECT CONCAT(COALESCE(REVERSE(SPLIT(s1.TableName, '[.]'))[2], 'hive_metastore'), 
+                    '.', COALESCE(REVERSE(SPLIT(s1.TableName, '[.]'))[1], 'default'), 
+                    '.', REVERSE(SPLIT(s1.TableName, '[.]'))[0]) AS FullTableName,
+                        s1.*
+                        FROM {self.database_name}.all_tables_table_stats s1
+                        WHERE UpdateTimestamp = (SELECT MAX(UpdateTimestamp) FROM {self.database_name}.all_tables_table_stats s2 WHERE s1.TableName = s2.TableName)
+                        ),
+         final_stats AS (    
+         SELECT DISTINCT
+            spine.FullTableName AS TableName,
+            spine.ColumnName,
+            spine.SampleSize,
+            spine.TotalCountInSample,
+            spine.DistinctCountOfColumnInSample,
+            spine.CardinalityProportion,
+            spine.CardinalityProportionScaled,
+            spine.IsUsedInReads,
+            spine.IsUsedInWrites,
+            spine.UpdateTimestamp,
             CASE WHEN array_contains(tls.partitionColumns, spine.ColumnName) THEN 1 ELSE 0 END AS IsPartitionCol,
             QueryReferenceCountScaled,
             RawTotalRuntimeScaled,
@@ -1193,13 +1254,21 @@ class DeltaOptimizer(DeltaOptimizerBase):
             isUsedInJoin,
             isUsedInFilter,
             isUsedInGroup
-            FROM {self.database_name}.all_tables_cardinality_stats AS spine
-            LEFT JOIN most_recent_table_stats AS tls ON tls.TableName = spine.TableName /* !! not idempotent, always choose most recent table stats !! */
+            FROM (SELECT CONCAT(COALESCE(REVERSE(SPLIT(sub_card.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(sub_card.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(sub_card.TableName, '[.]'))[0]) AS FullTableName,
+                              *
+                             FROM {self.database_name}.all_tables_cardinality_stats AS sub_card) AS spine
+            LEFT JOIN most_recent_table_stats AS tls ON tls.FullTableName = spine.FullTableName /* !! not idempotent, always choose most recent table stats !! */
             -- These are re-created every run
-            LEFT JOIN {self.database_name}.read_statistics_scaled_results AS reads ON (CASE WHEN spine.TableName = reads.TableName THEN spine.TableName = reads.TableName
-                                                              ELSE (COALESCE(split(spine.TableName, '[.]')[1], split(spine.TableName, '[.]')[0]) = COALESCE(split(reads.TableName, '[.]')[1], split(reads.TableName, '[.]')[0])) 
-                                                              END ) AND spine.ColumnName = reads.ColumnName
-            ),
+            LEFT JOIN (SELECT 
+                    CONCAT(COALESCE(REVERSE(SPLIT(sub_reads.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(sub_reads.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(sub_reads.TableName, '[.]'))[0]) AS FullTableName,
+                            *
+                              FROM {self.database_name}.read_statistics_scaled_results AS sub_reads) AS reads ON spine.FullTableName = reads.FullTableName 
+                                                                                            AND reads.ColumnName = spine.ColumnName),
+                                                                                            
             raw_scoring AS (
             -- THIS IS THE CORE SCORING EQUATION
             SELECT 
@@ -1307,31 +1376,52 @@ class DeltaOptimizer(DeltaOptimizerBase):
 
             analyze_stats_df = (self.spark.sql(f"""
                 WITH most_recent_table_stats AS (
-                        SELECT s1.*
+                        SELECT CONCAT(COALESCE(REVERSE(SPLIT(s1.TableName, '[.]'))[2], 'hive_metastore'), 
+                    '.', COALESCE(REVERSE(SPLIT(s1.TableName, '[.]'))[1], 'default'), 
+                    '.', REVERSE(SPLIT(s1.TableName, '[.]'))[0]) AS FullTableName,
+                        s1.*
                         FROM {self.database_name}.all_tables_table_stats s1
                         WHERE UpdateTimestamp = (SELECT MAX(UpdateTimestamp) FROM {self.database_name}.all_tables_table_stats s2 WHERE s1.TableName = s2.TableName)
                         ),
                stats_cols AS (
                     SELECT DISTINCT
-                    spine.TableName,
+                    spine.FullTableName AS TableName,
                     card_stats.ColumnName
                     FROM most_recent_table_stats spine
-                    LEFT JOIN {self.database_name}.all_tables_cardinality_stats AS card_stats ON card_stats.TableName = spine.TableName
-                    LEFT JOIN {self.database_name}.read_statistics_scaled_results AS reads ON card_stats.TableName = reads.TableName 
+                    LEFT JOIN (
+                            SELECT CONCAT(COALESCE(REVERSE(SPLIT(sub_card.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(sub_card.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(sub_card.TableName, '[.]'))[0]) AS FullTableName,
+                              *
+                             FROM {self.database_name}.all_tables_cardinality_stats AS sub_card
+                    
+                            ) AS card_stats ON card_stats.FullTableName = spine.FullTableName
+                    LEFT JOIN (SELECT 
+                    CONCAT(COALESCE(REVERSE(SPLIT(sub_reads.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(sub_reads.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(sub_reads.TableName, '[.]'))[0]) AS FullTableName,
+                            *
+                              FROM {self.database_name}.read_statistics_scaled_results AS sub_reads) AS reads ON card_stats.FullTableName = reads.FullTableName 
                                                                                             AND reads.ColumnName = card_stats.ColumnName
                     WHERE card_stats.IsUsedInWrites = 1
                         OR (reads.isUsedInJoin + reads.isUsedInFilter + reads.isUsedInGroup ) >= 1
                     )
                     SELECT 
-                    spine.TableName,
+                    spine.TableName AS TableName, -- This is the FullTableName under the hood
                     MAX(spine.sizeInGB) AS sizeInGB, -- We already chose most recnt file stats of each table
                     MAX(spine.mappedFileSizeInMb) AS fileSizeMap,
                     CASE WHEN MAX(IsUsedInWrites)::integer >= 1 THEN 1 ELSE 0 END AS ColumnsUsedInMerges, 
                     -- If table has ANY columns used in a merge predicate, tune file sizes for re-writes
                     concat_ws(',', array_distinct(collect_list(reads.ColumnName)))  AS ColumnsToCollectStatsOn
                     FROM most_recent_table_stats spine
-                    LEFT JOIN {self.database_name}.all_tables_cardinality_stats AS card_stats ON card_stats.TableName = spine.TableName
-                    LEFT JOIN stats_cols AS reads ON card_stats.TableName = reads.TableName AND reads.ColumnName = card_stats.ColumnName
+                    LEFT JOIN (SELECT 
+                            CONCAT(COALESCE(REVERSE(SPLIT(sub_card.TableName, '[.]'))[2], 'hive_metastore'), 
+                            '.', COALESCE(REVERSE(SPLIT(sub_card.TableName, '[.]'))[1], 'default'), 
+                            '.', REVERSE(SPLIT(sub_card.TableName, '[.]'))[0]) AS FullTableName,
+                              *
+                              FROM {self.database_name}.all_tables_cardinality_stats AS sub_card
+                              ) AS card_stats ON card_stats.FullTableName = spine.TableName
+                    LEFT JOIN stats_cols AS reads ON card_stats.FullTableName = reads.TableName AND reads.ColumnName = card_stats.ColumnName
                     GROUP BY spine.TableName
                     """)
                                )

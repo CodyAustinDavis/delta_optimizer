@@ -16,11 +16,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -r deltaoptimizer/requirements.txt
-
-# COMMAND ----------
-
-from deltaoptimizer.deltaoptimizer import DeltaProfiler, QueryProfiler, DeltaOptimizer
+from deltaoptimizer import DeltaProfiler, QueryProfiler, DeltaOptimizer
 import os
 
 # COMMAND ----------
