@@ -1177,7 +1177,7 @@ class DeltaOptimizer(DeltaOptimizerBase):
         ### Really basic heuristic to calculate statistics, can increase nuance in future versions
         tableSizeInGbLocal = float(tableSizeInGb)
 
-        if tableSizeInGbLocal <= 100:
+        if tableSizeInGbLocal <= 50:
             sqlExpr = f"ANALYZE TABLE {inputTableName} COMPUTE STATISTICS FOR ALL COLUMNS;"
             return sqlExpr
         else:
@@ -1404,7 +1404,7 @@ class DeltaOptimizer(DeltaOptimizerBase):
                               FROM {self.database_name}.read_statistics_scaled_results AS sub_reads) AS reads ON card_stats.FullTableName = reads.FullTableName 
                                                                                             AND reads.ColumnName = card_stats.ColumnName
                     WHERE card_stats.IsUsedInWrites = 1
-                        OR (reads.isUsedInJoin + reads.isUsedInFilter + reads.isUsedInGroup ) >= 1
+                         OR (COALESCE(reads.isUsedInJoin, 0) + COALESCE(reads.isUsedInFilter, 0) + COALESCE(reads.isUsedInGroup, 0) ) >= 1
                     )
                     SELECT 
                     spine.TableName AS TableName, -- This is the FullTableName under the hood
