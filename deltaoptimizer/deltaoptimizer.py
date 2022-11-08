@@ -28,7 +28,7 @@ Overview: This file provides 4 Main Classes:
 
 class DeltaOptimizerBase():
     
-    def __init__(self, database_name="delta_optimizer"):
+    def __init__(self, database_name="hive_metastore.delta_optimizer"):
 
         ## Assumes running on a spark environment
 
@@ -39,7 +39,14 @@ class DeltaOptimizerBase():
         ### Initialize Tables on instantiation
 
         ## Create Database
-        self.spark.sql(f"""CREATE DATABASE IF NOT EXISTS {self.database_name};""")
+        
+        try: 
+          self.spark.sql(f"""CREATE DATABASE IF NOT EXISTS {self.database_name};""")
+          
+        except Exception as e:
+          print(f"""Creating the database at location: {self.database_name} did not work...\n 
+          Please ensure the cluster is a UC Enabled cluster or just use hive_metastore""")
+          raise(e)
         
         ## Query Profiler Tables
         self.spark.sql(f"""CREATE TABLE IF NOT EXISTS {self.database_name}.query_history_log 
@@ -261,7 +268,7 @@ class DeltaOptimizerBase():
 
 class QueryProfiler(DeltaOptimizerBase):
     
-    def __init__(self, workspace_url, warehouse_ids, database_name="delta_optimizer"):
+    def __init__(self, workspace_url, warehouse_ids, database_name="hive_metastore.delta_optimizer"):
         
         ## Assumes running on a spark environment
         super().__init__(database_name=database_name)
@@ -770,13 +777,28 @@ class QueryProfiler(DeltaOptimizerBase):
 ######## Delta Profiler ##########
 class DeltaProfiler(DeltaOptimizerBase):
     
-    def __init__(self, monitored_db_csv = 'all', database_name="delta_optimizer"):
+    def __init__(self, monitored_db_csv = 'all', database_name="hive_metastore.delta_optimizer"):
         
-        super().__init__(database_name=database_name)
-        self.db_list = [x.strip() for x in monitored_db_csv.split(",") if x != '']
+        ## TO DO: MUST eventually deal with if someone says "all" dbs and config is not a subset, cause then it will monitor all catalogs and all databases
+        ## Right now, we just default for 
+        
+        ## Makes fully qualified database name use hive_metastore by default
+        full_qualitfied_delta_optimizer_db_name = 'hive_metastore.delta_optimizer';
+        if len(database_name.split(".")) ==1:
+          pass
+        else: 
+          full_qualitfied_delta_optimizer_db_name = database_name
+
+        super().__init__(database_name=full_qualitfied_delta_optimizer_db_name)
+        self.db_list = [x.strip() if (x != '' and len(x.split(".")) >=2) else 'hive_metastore.' + x.strip() for x in monitored_db_csv.split(",")]
+
+        ## Also get catalogs from fully qualified database names (so if db has a., then get first part, else, hive_metastore)
+        ## If monitored_catalogs != all
+
+        self.catalog_list = [x.split(".")[0].strip() for x in monitored_db_csv.split(",") if x != '' and len(x.split(".")) >=2]
         self.table_list = []
     
-        if (len(self.db_list) == 1 and self.db_list[0].lower() == 'all') or len(self.db_list) == 0:
+        if ((len(self.db_list) == 1 and self.db_list[0].lower() == 'all') or len(self.db_list) == 0):
             self.mode = 'all'
         else:
             self.mode = 'subset'
@@ -802,7 +824,7 @@ class DeltaProfiler(DeltaOptimizerBase):
         self.file_size_df = (self.spark.createDataFrame(self.file_size_map))
         
         ## df of tables initilization
-        self.tbl_df = self.spark.sql("show tables in default like 'xxx_delta_optimizer'")
+        self.tbl_df = self.spark.sql(f"show tables in {self.database_name} like 'xxx_delta_optimizer'")
 
         return
     
@@ -837,36 +859,56 @@ class DeltaProfiler(DeltaOptimizerBase):
     def get_all_tables_to_monitor(self):
         
         try:
-          ## Need to add catalog level loop
-            #Loop through all databases
-            for db in self.spark.sql("""show databases""").filter(F.col("databaseName").isin(self.db_list)).collect():
-              #create a dataframe with list of tables from the database
-              df = self.spark.sql(f"show tables in {db.databaseName}")
-              #union the tables list dataframe with main dataframe 
-              self.tbl_df = self.tbl_df.union(df)
+          
+          ## Make this where your delta optimizer lives
+          ## self.database_name should be fully qualified with catalog name (default to hive_metastore)
+          tbl_df = self.spark.sql(f"show tables in {self.database_name} like 'xxx_delta_optimizer'")
+          table_list = []
+          
+          for ct in self.spark.sql("""SHOW CATALOGS""").filter(F.col("catalog").isin(self.catalog_list)).collect():
 
-            ## Exclude temp views/tables
-            self.tbl_df = (self.tbl_df.filter(F.col("isTemporary") == F.lit('false')))
-
-            ## Check if in selected databases if mode is not all
-
-            if self.mode == "subset":
-
-                self.tbl_df = self.tbl_df.filter(F.col("database").isin(self.db_list))
-
-            self.tbl_df.createOrReplaceTempView("all_tables")
-
-            ## Need to add catalog level, for now, make this handled in the joins in the strategy level
-            df_tables = self.spark.sql("""
-            SELECT 
-            concat(database, '.', tableName) AS fully_qualified_table_name
-            FROM all_tables
-            """).collect()
-
-            self.table_list = [i[0] for i in df_tables]
-
-            #print(f"Tables Gather for Merge Predicate Analysis: \n {self.table_list}")
+            ## Initialize Catalog default
+            cat = ct.catalog
+            print(cat)
             
+            if len(cat) <= 1:
+              cat = 'hive_metastore'
+
+            if cat == "spark_catalog":
+              
+              print("This cluster is not UC enabled, assuming hive_metastore only")
+              cat = 'hive_metastore'
+
+
+            for db in self.spark.sql(f"""show databases IN {cat}""").filter(F.col("databaseName").isin(self.db_list)).collect():
+                #create a dataframe with list of tables from the database
+                df = self.spark.sql(f"show tables in {cat}.{db.databaseName}")
+                #union the tables list dataframe with main dataframe 
+                tbl_df = tbl_df.union(df)
+
+                ## Exclude temp views/tables
+                tbl_df = (tbl_df.filter(F.col("isTemporary") == F.lit('false')))
+
+                ## Check if in selected databases if mode is not all
+
+                if mode == "subset":
+
+                    tbl_df = tbl_df.filter(F.col("database").isin(self.db_list))
+
+                tbl_df.createOrReplaceTempView("all_tables")
+
+                ## Need to add catalog level, for now, make this handled in the joins in the strategy level
+                df_tables = self.spark.sql(f"""
+                SELECT 
+                concat(COALESCE('{cat}', 'hive_metastore'),'.', database, '.', tableName) AS fully_qualified_table_name
+                FROM all_tables
+                """).collect()
+                new_tables = [i[0] for i in df_tables]
+
+                table_list = table_list + new_tables
+      
+
+
         except Exception as e:
             raise(e)
         
@@ -1164,7 +1206,7 @@ class DeltaProfiler(DeltaOptimizerBase):
 
 class DeltaOptimizer(DeltaOptimizerBase):
     
-    def __init__(self, database_name="delta_optimizer"):
+    def __init__(self, database_name="hive_metastore.delta_optimizer"):
         
         super().__init__(database_name=database_name)
         
@@ -1177,7 +1219,7 @@ class DeltaOptimizer(DeltaOptimizerBase):
         ### Really basic heuristic to calculate statistics, can increase nuance in future versions
         tableSizeInGbLocal = float(tableSizeInGb)
 
-        if tableSizeInGbLocal <= 50:
+        if tableSizeInGbLocal <= 100:
             sqlExpr = f"ANALYZE TABLE {inputTableName} COMPUTE STATISTICS FOR ALL COLUMNS;"
             return sqlExpr
         else:
@@ -1404,7 +1446,7 @@ class DeltaOptimizer(DeltaOptimizerBase):
                               FROM {self.database_name}.read_statistics_scaled_results AS sub_reads) AS reads ON card_stats.FullTableName = reads.FullTableName 
                                                                                             AND reads.ColumnName = card_stats.ColumnName
                     WHERE card_stats.IsUsedInWrites = 1
-                         OR (COALESCE(reads.isUsedInJoin, 0) + COALESCE(reads.isUsedInFilter, 0) + COALESCE(reads.isUsedInGroup, 0) ) >= 1
+                        OR (reads.isUsedInJoin + reads.isUsedInFilter + reads.isUsedInGroup ) >= 1
                     )
                     SELECT 
                     spine.TableName AS TableName, -- This is the FullTableName under the hood

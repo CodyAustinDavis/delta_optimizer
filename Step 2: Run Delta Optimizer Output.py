@@ -44,13 +44,15 @@ from deltaoptimizer.deltaoptimizer import DeltaOptimizerBase, DeltaProfiler, Que
 
 # COMMAND ----------
 
-delta_optimizer = DeltaOptimizer()
-
-# COMMAND ----------
-
 dbutils.widgets.dropdown("table_mode", "include_all_tables", ["include_all_tables", "use_exclude_list", "use_include_list"])
 dbutils.widgets.text("exclude_list(csv)", "")
 dbutils.widgets.text("include_list(csv)", "")
+dbutils.widgets.text("Optimizer Output Database:", "hive_metastore.delta_optimizer")
+
+# COMMAND ----------
+
+optimizer_location = dbutils.widgets.get("Optimizer Output Database:").strip()
+delta_optimizer = DeltaOptimizer(database_name=optimizer_location)
 
 # COMMAND ----------
 

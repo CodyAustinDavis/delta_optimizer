@@ -26,7 +26,7 @@ import os
 # COMMAND ----------
 
 # DBTITLE 1,Register and Retrieve DBX Auth Token
-DBX_TOKEN = "<dbx_token>"
+DBX_TOKEN = "dapiaea7a4b617dfb4a5c30d8d2a78c1b542"
 
 # COMMAND ----------
 
@@ -34,22 +34,35 @@ DBX_TOKEN = "<dbx_token>"
 ## Assume running in a Databricks notebook
 dbutils.widgets.dropdown("Query History Lookback Period (days)", defaultValue="3",choices=["1","3","7","14","30","60","90"])
 dbutils.widgets.text("SQL Warehouse Ids (csv list)", "")
-dbutils.widgets.text("Workspace DNS:", "")
-dbutils.widgets.text("Database Names (csv):", "")
+dbutils.widgets.text("Server Hostname:", "")
+dbutils.widgets.text("Database Names (csv) - fully qualified or defaults to hive_metastore catalog:", "")
+dbutils.widgets.dropdown("Start Over?","No", ["Yes","No"])
+dbutils.widgets.text("Optimizer Output Database:", "hive_metastore.delta_optimizer")
 
 # COMMAND ----------
 
 lookbackPeriod = int(dbutils.widgets.get("Query History Lookback Period (days)"))
 warehouseIdsList = [i.strip() for i in dbutils.widgets.get("SQL Warehouse Ids (csv list)").split(",")]
-workspaceName = dbutils.widgets.get("Workspace DNS:").strip()
+workspaceName = dbutils.widgets.get("Server Hostname:").strip()
 warehouse_ids = dbutils.widgets.get("SQL Warehouse Ids (csv list)")
+start_over = dbutils.widgets.get("Start Over?")
+
+# COMMAND ----------
+
+database_output = dbutils.widgets.get("Optimizer Output Database:").strip()
+delta_optimizer = DeltaOptimizer()
+
+# COMMAND ----------
+
+if start_over == "Yes":
+  delta_optimizer.drop_delta_optimizer()
 
 # COMMAND ----------
 
 # DBTITLE 1,Build Query History Profile
 ####### Step 1: Build Profile #######
 ## Initialize Profiler
-query_profiler = QueryProfiler(workspaceName, warehouseIdsList)
+query_profiler = QueryProfiler(workspaceName, warehouseIdsList, database_name=database_output)
 
 query_profiler.build_query_history_profile(dbx_token = DBX_TOKEN, mode='auto', lookback_period_days=lookbackPeriod)
 
@@ -59,11 +72,11 @@ query_profiler.build_query_history_profile(dbx_token = DBX_TOKEN, mode='auto', l
 ####### Step 2: Build stats from transaction logs/table data #######
 
 ## Assume running on Databricks notebooks if not imported
-databases_raw = dbutils.widgets.get("Database Names (csv):")
+databases_raw = dbutils.widgets.get("Database Names (csv) - fully qualified or defaults to hive_metastore catalog:")
 
 
 ## Initialize class and pass in database csv string
-profiler = DeltaProfiler( monitored_db_csv= databases_raw) ## examples include 'default', 'mydb1,mydb2', 'all' or leave blank
+profiler = DeltaProfiler( monitored_db_csv= databases_raw, database_name=database_output) ## examples include 'default', 'mydb1,mydb2', 'all' or leave blank
 
 ## Get tables
 profiler.get_all_tables_to_monitor()
@@ -83,8 +96,6 @@ profiler.build_cardinality_stats()
 # DBTITLE 1,Run Delta Optimizer
 ####### Step 3: Build Strategy and Rank #######
 ## Build Strategy
-delta_optimizer = DeltaOptimizer()
-
 delta_optimizer.build_optimization_strategy()
 
 
