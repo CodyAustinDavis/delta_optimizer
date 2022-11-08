@@ -22,7 +22,7 @@ import os
 # COMMAND ----------
 
 # DBTITLE 1,Register and Retrieve DBX Auth Token
-DBX_TOKEN = "dapiaea7a4b617dfb4a5c30d8d2a78c1b542"
+DBX_TOKEN = "<dbx_token>"
 
 # COMMAND ----------
 
@@ -45,13 +45,16 @@ start_over = dbutils.widgets.get("Start Over?")
 
 # COMMAND ----------
 
-database_output = dbutils.widgets.get("Optimizer Output Database:").strip()
-delta_optimizer = DeltaOptimizer()
+if start_over == "Yes":
+  delta_optimizer = DeltaOptimizer(database_name=database_output)
+  delta_optimizer.drop_delta_optimizer()
 
 # COMMAND ----------
 
-if start_over == "Yes":
-  delta_optimizer.drop_delta_optimizer()
+database_output = dbutils.widgets.get("Optimizer Output Database:").strip()
+
+## Get Databases (can be fully qualified with catalog.db or just db assuming hive_metastore)
+databases_raw = dbutils.widgets.get("Database Names (csv) - fully qualified or defaults to hive_metastore catalog:")
 
 # COMMAND ----------
 
@@ -67,12 +70,8 @@ query_profiler.build_query_history_profile(dbx_token = DBX_TOKEN, mode='auto', l
 # DBTITLE 1,Run Delta Profiler
 ####### Step 2: Build stats from transaction logs/table data #######
 
-## Assume running on Databricks notebooks if not imported
-databases_raw = dbutils.widgets.get("Database Names (csv) - fully qualified or defaults to hive_metastore catalog:")
-
-
 ## Initialize class and pass in database csv string
-profiler = DeltaProfiler( monitored_db_csv= databases_raw, database_name=database_output) ## examples include 'default', 'mydb1,mydb2', 'all' or leave blank
+profiler = DeltaProfiler( monitored_db_csv= databases_raw, database_name=database_output) ## examples include 'default', 'mydb1,mydb2', 'my_db,my_catalog.my_db' or leave blank
 
 ## Get tables
 profiler.get_all_tables_to_monitor()
@@ -92,6 +91,9 @@ profiler.build_cardinality_stats()
 # DBTITLE 1,Run Delta Optimizer
 ####### Step 3: Build Strategy and Rank #######
 ## Build Strategy
+
+delta_optimizer = DeltaOptimizer(database_name=database_output)
+
 delta_optimizer.build_optimization_strategy()
 
 

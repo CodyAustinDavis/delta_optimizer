@@ -26,7 +26,7 @@ import os
 # COMMAND ----------
 
 # DBTITLE 1,Register and Retrieve DBX Auth Token
-DBX_TOKEN = "dapiaea7a4b617dfb4a5c30d8d2a78c1b542"
+DBX_TOKEN = "<dbx_token>"
 
 # COMMAND ----------
 
@@ -50,7 +50,7 @@ start_over = dbutils.widgets.get("Start Over?")
 # COMMAND ----------
 
 database_output = dbutils.widgets.get("Optimizer Output Database:").strip()
-delta_optimizer = DeltaOptimizer()
+delta_optimizer = DeltaOptimizer(database_name=database_output)
 
 # COMMAND ----------
 
@@ -96,6 +96,9 @@ profiler.build_cardinality_stats()
 # DBTITLE 1,Run Delta Optimizer
 ####### Step 3: Build Strategy and Rank #######
 ## Build Strategy
+
+delta_optimizer = DeltaOptimizer(database_name=database_output)
+
 delta_optimizer.build_optimization_strategy()
 
 
