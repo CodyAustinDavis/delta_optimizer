@@ -40,13 +40,15 @@ from deltaoptimizer import DeltaOptimizerBase, DeltaProfiler, QueryProfiler, Del
 
 # COMMAND ----------
 
-delta_optimizer = DeltaOptimizer()
-
-# COMMAND ----------
-
 dbutils.widgets.dropdown("table_mode", "include_all_tables", ["include_all_tables", "use_exclude_list", "use_include_list"])
 dbutils.widgets.text("exclude_list(csv)", "")
 dbutils.widgets.text("include_list(csv)", "")
+dbutils.widgets.text("Optimizer Output Database:", "hive_metastore.delta_optimizer")
+
+# COMMAND ----------
+
+optimizer_location = dbutils.widgets.get("Optimizer Output Database:").strip()
+delta_optimizer = DeltaOptimizer(database_name=optimizer_location)
 
 # COMMAND ----------
 
@@ -89,6 +91,10 @@ for i in config_tbl_prop:
         
     except Exception as e:
         print(f"TABLE PROPERTIES failed with error: {str(e)}\n")
+
+# COMMAND ----------
+
+print(col_list)
 
 # COMMAND ----------
 
@@ -135,7 +141,7 @@ for i in config_optim:
 ## This table by default has only 1 file, so it shouldnt be expensive to collect
 config_tbl_stats = [i[4] for i in config_row]
 
-print(f"Running {len(config_tbl_stats)} ANALYZE TABLE commands: \n {config_tbl_stats}")
+print(f"Running {len(config_tbl_stats)} TBL PROPERTIES (file size and re-writes) commands: \n {config_tbl_stats}")
 
 # COMMAND ----------
 
