@@ -790,12 +790,12 @@ class DeltaProfiler(DeltaOptimizerBase):
           full_qualitfied_delta_optimizer_db_name = database_name
 
         super().__init__(database_name=full_qualitfied_delta_optimizer_db_name)
-        self.db_list = [x.strip() if (x != '' and len(x.split(".")) >=2) else 'hive_metastore.' + x.strip() for x in monitored_db_csv.split(",")]
+        self.db_list = list(set([x.strip() if (x != '' and len(x.split(".")) >=2) else 'hive_metastore.' + x.strip() for x in monitored_db_csv.split(",")]))
 
         ## Also get catalogs from fully qualified database names (so if db has a., then get first part, else, hive_metastore)
         ## If monitored_catalogs != all
 
-        self.catalog_list = [x.split(".")[0].strip() for x in monitored_db_csv.split(",") if x != '' and len(x.split(".")) >=2]
+        self.catalog_list = list(set([x.split(".")[0].strip() if x != '' and len(x.split(".")) >=2 else 'hive_metastore'  for x in monitored_db_csv.split(",")] + ['spark_catalog']))
         self.table_list = []
     
         if ((len(self.db_list) == 1 and self.db_list[0].lower() == 'all') or len(self.db_list) == 0):
@@ -811,7 +811,7 @@ class DeltaProfiler(DeltaOptimizerBase):
                  {"max_table_size_gb": 128, "file_size": '128mb'},
                  {"max_table_size_gb": 256, "file_size": '128mb'},
                  {"max_table_size_gb": 512, "file_size": '256mb'},
-                 {"max_table_size_gb": 1024, "file_size": '307mb'},
+                 {"max_table_size_gb": 1024, "file_size": '256mb'},
                  {"max_table_size_gb": 2560, "file_size": '512mb'},
                  {"max_table_size_gb": 3072, "file_size": '716mb'},
                  {"max_table_size_gb": 5120, "file_size": '1gb'},
@@ -853,7 +853,7 @@ class DeltaProfiler(DeltaOptimizerBase):
     
     
     def get_table_list(self):
-        return set(self.table_list)
+        return list(set(self.table_list))
     
     
     def get_all_tables_to_monitor(self):
@@ -863,8 +863,10 @@ class DeltaProfiler(DeltaOptimizerBase):
           ## Make this where your delta optimizer lives
           ## self.database_name should be fully qualified with catalog name (default to hive_metastore)
           tbl_df = self.spark.sql(f"show tables in {self.database_name} like 'xxx_delta_optimizer'")
-          table_list = []
+          self.table_list = []
           
+          ## This returns nothing if not UC Enabled - default to having
+
           for ct in self.spark.sql("""SHOW CATALOGS""").filter(F.col("catalog").isin(self.catalog_list)).collect():
 
             ## Initialize Catalog default
@@ -880,7 +882,8 @@ class DeltaProfiler(DeltaOptimizerBase):
               cat = 'hive_metastore'
 
 
-            for db in self.spark.sql(f"""show databases IN {cat}""").filter(F.col("databaseName").isin(self.db_list)).collect():
+            for db in self.spark.sql(f"""show databases IN {cat}""").filter((F.col("databaseName").isin(self.db_list)) |  (F.concat(F.lit(cat), F.lit('.'), F.col("databaseName")).isin(self.db_list))).collect():
+
                 #create a dataframe with list of tables from the database
                 df = self.spark.sql(f"show tables in {cat}.{db.databaseName}")
                 #union the tables list dataframe with main dataframe 
@@ -891,9 +894,9 @@ class DeltaProfiler(DeltaOptimizerBase):
 
                 ## Check if in selected databases if mode is not all
 
-                if mode == "subset":
+                if self.mode == "subset":
 
-                    tbl_df = tbl_df.filter(F.col("database").isin(self.db_list))
+                    tbl_df = tbl_df.filter(F.col("database").isin(self.db_list) |  (F.concat(F.lit(cat), F.lit('.'), F.col("database")).isin(self.db_list)))
 
                 tbl_df.createOrReplaceTempView("all_tables")
 
@@ -905,7 +908,7 @@ class DeltaProfiler(DeltaOptimizerBase):
                 """).collect()
                 new_tables = [i[0] for i in df_tables]
 
-                table_list = table_list + new_tables
+                self.table_list = self.table_list + new_tables
       
 
 
@@ -921,7 +924,10 @@ class DeltaProfiler(DeltaOptimizerBase):
         ## If you only run this, must get tables to monitor first
         self.get_all_tables_to_monitor()
         
-        for tbl in set(self.table_list):
+        ## De dups
+        table_list = self.get_table_list()
+
+        for tbl in table_list:
             print(f"Running History Analysis for Table: {tbl}")
 
             try: 
@@ -1363,6 +1369,7 @@ class DeltaOptimizer(DeltaOptimizerBase):
                                       SELECT DISTINCT spine.TableName, s1.ColumnName
                                       FROM most_recent_table_stats spine
                                       LEFT JOIN {self.database_name}.final_ranked_cols_by_table s1 ON spine.TableName = s1.TableName AND RankUpdateTimestamp = (SELECT MAX(RankUpdateTimestamp) FROM {self.database_name}.final_ranked_cols_by_table s2)
+                                        AND s1.IsPartitionCol = 0 -- Add to exclude partition cols from ZORDER statement
 
                                       ),
                                         tt AS 
