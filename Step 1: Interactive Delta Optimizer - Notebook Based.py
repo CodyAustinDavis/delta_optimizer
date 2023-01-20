@@ -62,7 +62,16 @@ if start_over == "Yes":
 # DBTITLE 1,Build Query History Profile
 ####### Step 1: Build Profile #######
 ## Initialize Profiler
-query_profiler = QueryProfiler(workspaceName, warehouseIdsList, database_name=database_output)
+
+## catalogs_to_check_views should include ALL catalogs where views could live that you want to optimize underlying tables for
+## Ideally they are just the same catalogs are your database names defined in the params so we try to parse for you to start there, but if you need to add, change the list here. 
+
+## Assume running on Databricks notebooks if not imported
+databases_raw = dbutils.widgets.get("Database Names (csv) - fully qualified or defaults to hive_metastore catalog:").split(",")
+clean_catalogs = list(set([i.split(".")[0].strip() if len(i.split(".")) == 2 else 'hive_metastore' for i in databases_raw]))
+
+
+query_profiler = QueryProfiler(workspaceName, warehouseIdsList, database_name=database_output, catalogs_to_check_views=clean_catalogs, scrub_views=True)
 
 query_profiler.build_query_history_profile(dbx_token = DBX_TOKEN, mode='auto', lookback_period_days=lookbackPeriod)
 

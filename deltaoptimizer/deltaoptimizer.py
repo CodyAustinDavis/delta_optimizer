@@ -268,7 +268,7 @@ class DeltaOptimizerBase():
 
 class QueryProfiler(DeltaOptimizerBase):
     
-    def __init__(self, workspace_url, warehouse_ids, database_name="hive_metastore.delta_optimizer"):
+    def __init__(self, workspace_url, warehouse_ids, database_name="hive_metastore.delta_optimizer", catalogs_to_check_views=["hive_metastore"], scrub_views=True):
         
         ## Assumes running on a spark environment
         super().__init__(database_name=database_name)
@@ -276,7 +276,8 @@ class QueryProfiler(DeltaOptimizerBase):
         self.workspace_url = workspace_url.strip()
         self.warehouse_ids_list = [i.strip() for i in warehouse_ids]
         self.warehouse_ids = ",".join(self.warehouse_ids_list)
-        
+        self.catalogs_to_check_list = catalogs_to_check_views
+        self.scrub_views = scrub_views ## optional param to opt out of new functionality for v1.2.0
         print(f"Initializing Delta Optimizer for: {self.workspace_url}\n Monitoring SQL Warehouses: {self.warehouse_ids} \n Database Location: {self.database_name}")
         ### Initialize Tables on instantiation
   
@@ -347,6 +348,7 @@ class QueryProfiler(DeltaOptimizerBase):
 
         return final_table_map
 
+      
     @staticmethod
     @F.udf("integer")
     def checkIfJoinColumn(sqlString, columnName):
@@ -371,6 +373,7 @@ class QueryProfiler(DeltaOptimizerBase):
             return 0
 
           
+          
     @staticmethod
     @F.udf("integer")
     def checkIfFilterColumn(sqlString, columnName):
@@ -394,7 +397,8 @@ class QueryProfiler(DeltaOptimizerBase):
             ### Eventually we want to be able to return this be return the full json instead of just a 0 or 1
             return 0
           
-          
+        
+        
     @staticmethod
     @F.udf("integer")
     def checkIfGroupColumn(sqlString, columnName):
@@ -418,6 +422,29 @@ class QueryProfiler(DeltaOptimizerBase):
             ### Eventually we want to be able to return this be return the full json instead of just a 0 or 1
             return 0
 
+          
+    ## Function to recursively replace views with their underlying tables in text... lazy I know Im sorry I dont have time :'(
+    @staticmethod
+    @F.udf("string")
+    def replace_query_with_views(query_text, view_name_list, view_text_list):
+
+        try:
+          query = query_text
+
+          if view_name_list is None or len(view_name_list) == 0:
+                  return query
+          else:
+            
+              for i, v in enumerate(view_name_list): 
+                  new_text = "( " + view_text_list[i] + " )"
+
+                  query = re.sub(v, new_text, query, flags=re.IGNORECASE)
+
+              return query
+            
+        except:
+          return query_text
+          
           
     ## Convert timestamp to milliseconds for API
     @staticmethod
@@ -477,6 +504,62 @@ class QueryProfiler(DeltaOptimizerBase):
             raise(e)
     
     
+    ## given a list of catalogs (or just hive_metastore) get a df of all views and their definitions to ensure we profile the source tables
+    def get_all_view_texts_df(self):
+
+      catalogs_to_check_list = self.catalogs_to_check_list
+      self.spark.conf.set("spark.sql.shuffle.partitions", "1")
+      full_view_list = []
+
+
+      ## Confirm catalogs exist
+      catalog_list = list(set([i[0] for i in self.spark.sql("""SHOW CATALOGS""").filter(F.col("catalog").isin(*catalogs_to_check_list)).collect()]))
+
+      for c in catalog_list: 
+
+          database_list = list(set([i[0] for i in self.spark.sql(f"SHOW databases IN {c}").collect() if i != 'information_schema']))
+
+          for d in database_list:
+              if d == 'information_schema':
+                  pass
+              else: 
+                  print(d)
+                  self.spark.sql(f"""USE CATALOG {c};""")
+
+                  views_df = list(set([i[0] for i in self.spark.sql(f"""SHOW VIEWS IN {c}.{d}""")
+                                                       .filter((F.col("isTemporary") == False) & (F.length(F.col("namespace")) >=1))
+                                                       .withColumn("full_view_name", F.concat(F.lit(f'{c}'),F.lit('.'),F.col('namespace'),F.lit('.'),F.col('viewName')))
+                                                       .select("full_view_name").collect()]))
+
+                  full_view_list.append(views_df)
+
+
+      clean_view_list = list(set([item for sublist in full_view_list for item in sublist if len(item) > 0]))
+
+
+      all_views = []
+      self.spark.conf.set("spark.sql.shuffle.partitions", "1")
+
+
+      for v in clean_view_list: 
+
+          df_view_text = self.spark.sql(f"""DESCRIBE TABLE EXTENDED {v}""")
+
+          new_view = df_view_text.filter(F.col("col_name") == F.lit("View Text")).withColumn("view_name", F.lit(v)).select("view_name","data_type").collect()[0]
+
+          view_view_dict = {"view_name":new_view[0], "view_text": new_view[1]}
+
+          all_views.append(view_view_dict)
+
+
+      views_df = self.spark.createDataFrame(all_views)
+
+      ## Go back to a normal parallelism
+      self.spark.conf.set("spark.sql.shuffle.partitions", self.sc.defaultParallelism*2)
+
+      return views_df
+
+  
 
     ## Run the Query History Pull (main function)
     def build_query_history_profile(self, dbx_token, mode='auto', lookback_period_days=3):
@@ -600,6 +683,9 @@ class QueryProfiler(DeltaOptimizerBase):
             ## If successfull, insert log
             self.insert_query_history_delta_log(start_ts_ms, end_ts_ms)
             
+            ## Add optimization to reduce small file problem
+            
+            self.spark.sql(f"""OPTIMIZE {self.database_name}.raw_query_history_statistics""")
             
             ## Build Aggregate Summary Statistics with old and new queries
             self.spark.sql(f"""
@@ -624,13 +710,50 @@ class QueryProfiler(DeltaOptimizerBase):
                 )
                 """)
             
-            ## Parse SQL Query and Save into parsed distinct queries table
-            df = self.spark.sql(f"""SELECT DISTINCT query_id, query_text FROM {self.database_name}.raw_query_history_statistics""")
+            ## Optional param to clean and replace views with table definitions
+            if self.scrub_views == True:
+              
+              ## Parse SQL Query and Save into parsed distinct queries table
+              df_pre_clean = self.spark.sql(f"""SELECT DISTINCT query_id, query_text FROM {self.database_name}.raw_query_history_statistics""")
+
+              ## Add View Definition Replacement Here before Profiling
+
+              views_df = self.get_all_view_texts_df()
+
+              df_pre_clean.createOrReplaceTempView("queries")
+              views_df.createOrReplaceTempView("views")
+
+              ## Clean Query Text and Replace Views with Underlying Definitions to profile accurately
+              
+              ### Register the udf for SQL 
+              self.spark.udf.register("replace_query_with_views", self.replace_query_with_views)
+
+              df = self.spark.sql("""WITH view_int AS (
+                      SELECT q.*,
+                      REGEXP_REPLACE(q.query_text, '`', '') AS scrubbed_query,
+                      collect_list(view_name) AS view_name_list,
+                      collect_list(view_text) AS view_text_list
+                      FROM queries AS q
+                      LEFT JOIN views AS v ON REGEXP_REPLACE(q.query_text, '`', '') ILIKE (CONCAT('%', v.view_name, '%')) --this is expensive but we gotta do it for now
+                      GROUP BY q.query_id, q.query_text, REGEXP_REPLACE(q.query_text, '`', '')
+                      )
+                      --clean up views and replace with table definition
+                      SELECT
+                      query_id,
+                      replace_query_with_views(scrubbed_query, view_name_list, view_text_list) AS query_text
+                      FROM view_int""")
+              
+              
+            elif self.scrub_views == False:
+              df = self.spark.sql(f"""SELECT DISTINCT query_id, query_text FROM {self.database_name}.raw_query_history_statistics""")
+              
+            ## Profile full tables
 
             df_profiled = (df.withColumn("profiled_columns", self.getParsedFilteredColumnsinSQL(F.col("query_text")))
                     )
 
             df_profiled.createOrReplaceTempView("new_parsed")
+            
             
             self.spark.sql(f"""
                 MERGE INTO {self.database_name}.parsed_distinct_queries AS target
@@ -990,6 +1113,7 @@ class DeltaProfiler(DeltaOptimizerBase):
                 """
                               )
                 
+                ## TO DO: Add another column that looks for columns ALREADY ZORDERed for table
                 print(f"History analysis successful! (will be empty if no tables using predicates) You can see results here: SELECT * FROM {self.database_name}.write_statistics_merge_predicate")
 
             except Exception as e:
@@ -1333,6 +1457,7 @@ class DeltaOptimizer(DeltaOptimizerBase):
                 END
             END AS RawScore
             FROM final_stats
+            WHERE IsPartitionCol = 0
             ),
             ranked_scores AS (
             SELECT 
@@ -1369,7 +1494,6 @@ class DeltaOptimizer(DeltaOptimizerBase):
                                       SELECT DISTINCT spine.TableName, s1.ColumnName
                                       FROM most_recent_table_stats spine
                                       LEFT JOIN {self.database_name}.final_ranked_cols_by_table s1 ON spine.TableName = s1.TableName AND RankUpdateTimestamp = (SELECT MAX(RankUpdateTimestamp) FROM {self.database_name}.final_ranked_cols_by_table s2)
-                                        AND s1.IsPartitionCol = 0 -- Add to exclude partition cols from ZORDER statement
 
                                       ),
                                         tt AS 
