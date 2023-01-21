@@ -26,7 +26,7 @@ import os
 # COMMAND ----------
 
 # DBTITLE 1,Register and Retrieve DBX Auth Token
-DBX_TOKEN = "<dbx_token>"
+DBX_TOKEN = "<token>"
 
 # COMMAND ----------
 

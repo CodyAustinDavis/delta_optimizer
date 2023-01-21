@@ -28,13 +28,20 @@ Overview: This file provides 4 Main Classes:
 
 class DeltaOptimizerBase():
     
-    def __init__(self, database_name="hive_metastore.delta_optimizer"):
+    def __init__(self, database_name="hive_metastore.delta_optimizer", shuffle_partitions=None):
 
         ## Assumes running on a spark environment
 
         self.database_name = database_name
         self.spark = SparkSession.getActiveSession()
-
+        self.shuffle_partitions = shuffle_partitions if None else self.spark.sparkContext.defaultParallelism*2
+        ## set parallelism based on cluster
+        
+        if shuffle_partitions is None:
+          self.spark.conf.set("spark.sql.shuffle.partitions", self.shuffle_partitions)
+        
+        
+        
         print(f"Initializing Delta Optimizer at database location: {self.database_name}")
         ### Initialize Tables on instantiation
 
@@ -268,10 +275,10 @@ class DeltaOptimizerBase():
 
 class QueryProfiler(DeltaOptimizerBase):
     
-    def __init__(self, workspace_url, warehouse_ids, database_name="hive_metastore.delta_optimizer", catalogs_to_check_views=["hive_metastore"], scrub_views=True):
+    def __init__(self, workspace_url, warehouse_ids, database_name="hive_metastore.delta_optimizer", catalogs_to_check_views=["hive_metastore"], scrub_views=True, shuffle_partitions=None):
         
         ## Assumes running on a spark environment
-        super().__init__(database_name=database_name)
+        super().__init__(database_name=database_name, shuffle_partitions=shuffle_partitions)
         
         self.workspace_url = workspace_url.strip()
         self.warehouse_ids_list = [i.strip() for i in warehouse_ids]
@@ -511,7 +518,8 @@ class QueryProfiler(DeltaOptimizerBase):
       self.spark.conf.set("spark.sql.shuffle.partitions", "1")
       full_view_list = []
 
-
+      ### TECH DEBT: For now, this is not filtering on the same databases as the views, it goes much broader, but in the future let the user specificy to just the databases. It goes broader because many users do not keep good track of where the source database tables and views are across databases. 
+      
       ## Confirm catalogs exist
       catalog_list = list(set([i[0] for i in self.spark.sql("""SHOW CATALOGS""").filter(F.col("catalog").isin(*catalogs_to_check_list)).collect()]))
 
@@ -523,15 +531,25 @@ class QueryProfiler(DeltaOptimizerBase):
               if d == 'information_schema':
                   pass
               else: 
-                  print(d)
-                  self.spark.sql(f"""USE CATALOG {c};""")
+                
+                try:
+                    
+                    print(d)
+                    self.spark.sql(f"""USE CATALOG {c};""")
 
-                  views_df = list(set([i[0] for i in self.spark.sql(f"""SHOW VIEWS IN {c}.{d}""")
-                                                       .filter((F.col("isTemporary") == False) & (F.length(F.col("namespace")) >=1))
-                                                       .withColumn("full_view_name", F.concat(F.lit(f'{c}'),F.lit('.'),F.col('namespace'),F.lit('.'),F.col('viewName')))
-                                                       .select("full_view_name").collect()]))
+                    views_df = list(set([i[0] for i in self.spark.sql(f"""SHOW VIEWS IN `{c}`.`{d}`""")
+                                                         .filter((F.col("isTemporary") == False) & (F.length(F.col("namespace")) >=1))
+                                                         .withColumn("full_view_name", F.concat(F.lit(f'{c}'),F.lit('.'),F.col('namespace'),F.lit('.'),F.col('viewName')))
+                                                         .select("full_view_name").collect()]))
 
-                  full_view_list.append(views_df)
+                    full_view_list.append(views_df)
+                  
+                except Exception as e:
+                  #TECH DEBT v1.2.0 - Skipping these, people shouldnt name databases poorly anyways
+                  print(f"Was not able to process database {d}  skipping file(some special characters are not yet supported in database names (i.e. -! )")
+                  pass
+                  
+                  
 
 
       clean_view_list = list(set([item for sublist in full_view_list for item in sublist if len(item) > 0]))
@@ -540,7 +558,7 @@ class QueryProfiler(DeltaOptimizerBase):
       all_views = []
       self.spark.conf.set("spark.sql.shuffle.partitions", "1")
 
-
+      print("Finding all views in list and replacing queries with view defintions for profiling...")
       for v in clean_view_list: 
 
           df_view_text = self.spark.sql(f"""DESCRIBE TABLE EXTENDED {v}""")
@@ -550,12 +568,24 @@ class QueryProfiler(DeltaOptimizerBase):
           view_view_dict = {"view_name":new_view[0], "view_text": new_view[1]}
 
           all_views.append(view_view_dict)
+          
 
 
-      views_df = self.spark.createDataFrame(all_views)
+      print(f"View List: \n {all_views}")
+      ## If there are no views, just send back empty df
+      if len(all_views) == 0:
+        all_views = [{"view_name":None, "view_text": None}]
+    
+    
+      view_struct = StructType(
+                      [StructField("view_name", StringType(), True),
+                      StructField("view_text", StringType(), True)]
+                      )
+
+      views_df = self.spark.createDataFrame(all_views, schema=view_struct)
 
       ## Go back to a normal parallelism
-      self.spark.conf.set("spark.sql.shuffle.partitions", self.sc.defaultParallelism*2)
+      self.spark.conf.set("spark.sql.shuffle.partitions", self.shuffle_partitions)
 
       return views_df
 
@@ -900,7 +930,7 @@ class QueryProfiler(DeltaOptimizerBase):
 ######## Delta Profiler ##########
 class DeltaProfiler(DeltaOptimizerBase):
     
-    def __init__(self, monitored_db_csv = 'all', database_name="hive_metastore.delta_optimizer"):
+    def __init__(self, monitored_db_csv = 'all', database_name="hive_metastore.delta_optimizer", shuffle_partitions=None):
         
         ## TO DO: MUST eventually deal with if someone says "all" dbs and config is not a subset, cause then it will monitor all catalogs and all databases
         ## Right now, we just default for 
@@ -912,7 +942,7 @@ class DeltaProfiler(DeltaOptimizerBase):
         else: 
           full_qualitfied_delta_optimizer_db_name = database_name
 
-        super().__init__(database_name=full_qualitfied_delta_optimizer_db_name)
+        super().__init__(database_name=full_qualitfied_delta_optimizer_db_name, shuffle_partitions=shuffle_partitions)
         self.db_list = list(set([x.strip() if (x != '' and len(x.split(".")) >=2) else 'hive_metastore.' + x.strip() for x in monitored_db_csv.split(",")]))
 
         ## Also get catalogs from fully qualified database names (so if db has a., then get first part, else, hive_metastore)
@@ -1336,9 +1366,9 @@ class DeltaProfiler(DeltaOptimizerBase):
 
 class DeltaOptimizer(DeltaOptimizerBase):
     
-    def __init__(self, database_name="hive_metastore.delta_optimizer"):
+    def __init__(self, database_name="hive_metastore.delta_optimizer", shuffle_partitions=None):
         
-        super().__init__(database_name=database_name)
+        super().__init__(database_name=database_name, shuffle_partitions=shuffle_partitions)
         
         return
     
