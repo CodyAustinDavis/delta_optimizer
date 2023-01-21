@@ -561,13 +561,20 @@ class QueryProfiler(DeltaOptimizerBase):
       print("Finding all views in list and replacing queries with view defintions for profiling...")
       for v in clean_view_list: 
 
-          df_view_text = self.spark.sql(f"""DESCRIBE TABLE EXTENDED {v}""")
+          try:
+            
+            df_view_text = self.spark.sql(f"""DESCRIBE TABLE EXTENDED {v}""")
 
-          new_view = df_view_text.filter(F.col("col_name") == F.lit("View Text")).withColumn("view_name", F.lit(v)).select("view_name","data_type").collect()[0]
+            new_view = df_view_text.filter(F.col("col_name") == F.lit("View Text")).withColumn("view_name", F.lit(v)).select("view_name","data_type").collect()[0]
 
-          view_view_dict = {"view_name":new_view[0], "view_text": new_view[1]}
+            view_view_dict = {"view_name":new_view[0], "view_text": new_view[1]}
 
-          all_views.append(view_view_dict)
+            all_views.append(view_view_dict)
+            
+          except Exception as e:
+            print(f"Getting view definition failed with error: {str(e)}")
+            pass
+        
           
 
 
