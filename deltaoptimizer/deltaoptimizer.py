@@ -28,7 +28,14 @@ Overview: This file provides 4 Main Classes:
 
 class DeltaOptimizerBase():
     
-    def __init__(self, database_name="hive_metastore.delta_optimizer", shuffle_partitions=None):
+    def __init__(self, database_name="hive_metastore.delta_optimizer", 
+                 catalog_filter_mode='all', 
+                 catalog_filter_list=[], 
+                 database_filter_mode='all', 
+                 database_filter_list = [], 
+                 table_filter_mode='all', 
+                 table_filter_list=[], 
+                 shuffle_partitions=None):
 
         ## Assumes running on a spark environment
 
@@ -40,6 +47,46 @@ class DeltaOptimizerBase():
         if shuffle_partitions is None:
           self.spark.conf.set("spark.sql.shuffle.partitions", self.shuffle_partitions)
         
+        
+        #### Store information across optimizer classes that specify what scope of catalogs, databases, and tables are being monitored in this optimizer instance
+        self.catalog_filter_list = catalog_filter_list
+        #self.database_filter_list = database_filter_list
+        self.table_filter_list = table_filter_list
+        
+        ## Add double check to make sure its fully qualified
+        self.database_filter_list = list(set([x.strip() if (x != '' and len(x.split(".")) >=2) else 'hive_metastore.' + x.strip() for x in database_filter_list]))
+        
+        ## These are the final outputs from the get_tables_to_monitor() function
+        self.clean_catalog_list = []
+        self.clean_database_list = []
+        self.clean_table_list = []
+        
+        ## Further refines tables to profile. 
+        ## TABLE NAMES IN LIST MUST BE FULLY QUALIFIED (catalog.database.table)
+        
+        if catalog_filter_mode in ['all', 'include_list', 'exclude_list']:
+          self.catalog_filter_mode = catalog_filter_mode
+        else:
+          
+          self.catalog_filter_mode = 'all'
+          print(f"WARNING - Catalog Filter Mode not correct ({catalog_filter_mode})... must be: all, include_list, exclude_list. If none of these, it will default to all mode.")
+         
+        
+        if database_filter_mode in ['all', 'include_list', 'exclude_list']:
+          self.database_filter_mode = database_filter_mode
+        else:
+          
+          self.database_filter_mode = 'all'
+          print(f"WARNING - Database Filter Mode not correct ({database_filter_mode})... must be: all, include_list, exclude_list. If none of these, it will default to all mode.")
+         
+        
+        if table_filter_mode in ['all', 'include_list', 'exclude_list']:
+          self.table_filter_mode = table_filter_mode
+        else:
+          
+          self.table_filter_mode = 'all'
+          print(f"WARNING - Table Filter Mode not correct ({table_filter_mode})... must be: all, include_list, exclude_list. If none of these, it will default to all mode.")
+          
         
         
         print(f"Initializing Delta Optimizer at database location: {self.database_name}")
@@ -67,6 +114,7 @@ class DeltaOptimizerBase():
         self.spark.sql(f"""CREATE TABLE IF NOT EXISTS {self.database_name}.raw_query_history_statistics
                         (Id BIGINT GENERATED ALWAYS AS IDENTITY,
                         query_id STRING,
+                        query_hash STRING,
                         query_start_time_ms FLOAT,
                         query_end_time_ms FLOAT,
                         duration FLOAT,
@@ -80,7 +128,7 @@ class DeltaOptimizerBase():
         self.spark.sql(f"""CREATE TABLE IF NOT EXISTS {self.database_name}.parsed_distinct_queries
                         (
                         Id BIGINT GENERATED ALWAYS AS IDENTITY,
-                        query_id STRING,
+                        query_hash STRING, -- v.1.4.0 took out query_id because its NOT distinct
                         query_text STRING,
                         profiled_columns ARRAY<STRING>
                         )
@@ -126,7 +174,7 @@ class DeltaOptimizerBase():
                 )""")
 
         self.spark.sql(f"""CREATE TABLE IF NOT EXISTS {self.database_name}.query_summary_statistics (
-                query_id STRING,
+                query_id STRING, -- !!THIS IS THE QUERY HASH - SELF BUILT UNIQUE QUERY ID
                 AverageQueryDuration DOUBLE,
                 AverageRowsProduced DOUBLE,
                 TotalQueryRuns LONG,
@@ -139,6 +187,7 @@ class DeltaOptimizerBase():
                 ColumnName STRING,
                 query_text STRING,
                 query_id STRING,
+                query_hash STRING,
                 AverageQueryDuration DOUBLE,
                 AverageRowsProduced DOUBLE,
                 TotalQueryRuns LONG,
@@ -223,14 +272,117 @@ class DeltaOptimizerBase():
                 OptimizeCommandString STRING, --OPTIMIZE OPTIONAL < ZORDER BY >
                 AlterTableCommandString STRING, --delta.targetFileSize, delta.tuneFileSizesForRewrites
                 AnalyzeTableCommandString STRING, -- ANALYZE TABLE COMPUTE STATISTICS
-                ColumnOrderingCommandString ARRAY<STRING>
+                ColumnOrderingCommandString ARRAY<STRING>,
+                UpdateTimestamp TIMESTAMP
                 )
                 USING DELTA
         """)
         
         return
     
-        ## Clear database and start over
+    def get_catalog_list(self):
+      return list(set(self.clean_catalog_list))
+    
+    def get_database_list(self):
+      return list(set(self.clean_database_list))
+    
+    def get_table_list(self):
+      return list(set(self.clean_table_list))
+    
+    
+    ## This cleanly gets all tables to monitor by going through all the set logic of inclusion/exclusion lists
+    def get_all_tables_to_monitor(self):
+       
+      ## This process goes through each filtering level rule by catalog --> database --> table. 
+      ## No matter which rule, the lower level in the hieracrhy is ALWAYS a subset of the output of the above level. 
+      print("Getting Tables to monitor...")
+      try:
+        ## initialize the empty table list data frame, we will union to this local version
+        tbl_df = self.tbl_df
+        
+        
+        if self.catalog_filter_mode == 'include_list': 
+          catalogs_to_run = self.spark.sql("""SHOW CATALOGS""").filter(F.col("catalog").isin(self.catalog_filter_list)).collect()
+
+        elif self.catalog_filter_mode == 'exclude_list':
+          catalogs_to_run = self.spark.sql("""SHOW CATALOGS""").filter(~F.col("catalog").isin(self.catalog_filter_list)).collect()
+
+        elif self.catalog_filter_mode == 'all':
+          catalogs_to_run = self.spark.sql("""SHOW CATALOGS""").collect()
+
+        self.clean_catalog_list = list(set(self.clean_catalog_list + [i[0] for i in catalogs_to_run]))
+        
+
+        for ct in catalogs_to_run:
+          ## Initialize Catalog default
+          cat = ct.catalog
+          #print(cat)
+
+          if len(cat) <= 1:
+            cat = 'hive_metastore'
+
+          if cat == "spark_catalog":
+
+            print("This cluster is not UC enabled, assuming hive_metastore only")
+            cat = 'hive_metastore'
+
+
+          ## Perform the database filtering
+
+          if self.database_filter_mode == 'include_list': 
+            databases_to_run = self.spark.sql(f"""show databases IN {cat}""").filter((F.col("databaseName").isin(self.database_filter_list)) |  (F.concat(F.lit(cat), F.lit('.'), F.col("databaseName")).isin(self.database_filter_list))).collect()
+
+          elif self.database_filter_mode == 'exclude_list':
+            databases_to_run = self.spark.sql(f"""show databases IN {cat}""").filter(~((F.col("databaseName").isin(self.database_filter_list)) |  (F.concat(F.lit(cat), F.lit('.'), F.col("databaseName")).isin(self.database_filter_list)))).collect()
+
+          elif self.database_filter_mode == 'all':
+            databases_to_run = self.spark.sql(f"""show databases IN `{cat}`""").collect()
+
+          ## add these databases to run to the class property
+          self.clean_database_list = list(set(self.clean_database_list + [str(cat) + '.' + i[0] for i in databases_to_run]))
+
+          ## go through databases to run and add tables to monitor
+          for db in databases_to_run:
+
+                    #create a dataframe with list of tables from the database
+                    df = self.spark.sql(f"show tables in `{cat}`.`{db.databaseName}`")
+                    #union the tables list dataframe with main dataframe 
+                    tbl_df = tbl_df.union(df)
+
+                    ## Exclude temp views/tables
+                    tbl_df = (tbl_df.filter(F.col("isTemporary") == F.lit('false')))
+
+                    tbl_df.createOrReplaceTempView("all_tables")
+
+                    ## Need to add catalog level, for now, make this handled in the joins in the strategy level
+                    df_tables = self.spark.sql(f"""
+                    SELECT 
+                    concat(COALESCE('{cat}', 'hive_metastore'),'.', database, '.', tableName) AS fully_qualified_table_name
+                    FROM all_tables
+                    """).collect()
+
+                    ## Check Table List Filters- THIS ENSURE ONLY TABLES IN THE PROVIDED DATABASE LISTS ARE ALLOWED
+
+                    if self.table_filter_mode == 'include_list':
+                      new_tables = [i[0] for i in df_tables if i[0] in self.table_filter_list]
+
+                    elif self.table_filter_mode == 'exclude_list':
+                      new_tables = [i[0] for i in df_tables if i[0] not in self.table_filter_list]
+
+                    elif self.table_filter_mode == 'all':
+                      new_tables = [i[0] for i in df_tables]
+
+                     ## Add new table batch to table list
+                    self.clean_table_list = self.clean_table_list + new_tables                                     
+
+
+      except Exception as e:
+        raise(e)
+
+      return
+        
+        
+    ## Clear database and start over
     def truncate_delta_optimizer_results(self):
         
         print(f"Truncating database (and all tables within): {self.database_name}...")
@@ -275,16 +427,36 @@ class DeltaOptimizerBase():
 
 class QueryProfiler(DeltaOptimizerBase):
     
-    def __init__(self, workspace_url, warehouse_ids, database_name="hive_metastore.delta_optimizer", catalogs_to_check_views=["hive_metastore"], scrub_views=True, shuffle_partitions=None):
+    def __init__(self, workspace_url, warehouse_ids, 
+                 database_name="hive_metastore.delta_optimizer", 
+                 catalogs_to_check_views=["hive_metastore"], 
+                 catalog_filter_mode='all', 
+                 catalog_filter_list=[], 
+                 database_filter_mode='all', 
+                 database_filter_list = [], 
+                 table_filter_mode='all', 
+                 table_filter_list=[], 
+                 scrub_views=True, 
+                 shuffle_partitions=None):
         
         ## Assumes running on a spark environment
-        super().__init__(database_name=database_name, shuffle_partitions=shuffle_partitions)
+        ## This is getting the subset of tables to filter for given all the subset logic
+        super().__init__(database_name=database_name, 
+                         catalog_filter_mode = catalog_filter_mode, 
+                         catalog_filter_list=catalog_filter_list, 
+                         database_filter_mode=database_filter_mode, 
+                         database_filter_list = database_filter_list, 
+                         table_filter_mode=table_filter_mode, 
+                         table_filter_list=table_filter_list, 
+                         shuffle_partitions=shuffle_partitions)
         
         self.workspace_url = workspace_url.strip()
         self.warehouse_ids_list = [i.strip() for i in warehouse_ids]
         self.warehouse_ids = ",".join(self.warehouse_ids_list)
         self.catalogs_to_check_list = catalogs_to_check_views
         self.scrub_views = scrub_views ## optional param to opt out of new functionality for v1.2.0
+        self.tbl_df = self.spark.sql(f"show tables in {self.database_name} like 'xxx_delta_optimizer'")
+
         print(f"Initializing Delta Optimizer for: {self.workspace_url}\n Monitoring SQL Warehouses: {self.warehouse_ids} \n Database Location: {self.database_name}")
         ### Initialize Tables on instantiation
   
@@ -697,25 +869,30 @@ class QueryProfiler(DeltaOptimizerBase):
         
         ## Start Profiling Process
         try: 
+            ## v.1.3.1 skip insert if no responses from API
+            if (all_responses is None or len(all_responses) == 0):
+              pass
             
-            ## Get responses and save to Delta 
-            raw_queries_df = (self.spark.createDataFrame(all_responses))
-            raw_queries_df.createOrReplaceTempView("raw")
+            else:
+              ## Get responses and save to Delta 
+              raw_queries_df = (self.spark.createDataFrame(all_responses))
+              raw_queries_df.createOrReplaceTempView("raw")
 
-            self.spark.sql(f"""INSERT INTO {self.database_name}.raw_query_history_statistics (query_id,query_start_time_ms, query_end_time_ms, duration, query_text, status, statement_type,rows_produced,metrics)
-                        SELECT
-                        query_id,
-                        query_start_time_ms,
-                        query_end_time_ms,
-                        duration,
-                        query_text,
-                        status,
-                        statement_type,
-                        rows_produced,
-                        metrics
-                        FROM raw
-                        WHERE statement_type IN ('SELECT', 'INSERT', 'REPLACE');
-                        """)
+              self.spark.sql(f"""INSERT INTO {self.database_name}.raw_query_history_statistics (query_id,query_hash, query_start_time_ms, query_end_time_ms, duration, query_text, status, statement_type,rows_produced,metrics)
+                          SELECT
+                          query_id,
+                          sha(query_text) AS query_hash, -- v.1.4.0 - MUST PARSE DISTINCT Queryies cause DBX query id is not by query
+                          query_start_time_ms,
+                          query_end_time_ms,
+                          duration,
+                          query_text,
+                          status,
+                          statement_type,
+                          rows_produced,
+                          metrics
+                          FROM raw
+                          WHERE statement_type IN ('SELECT', 'INSERT', 'REPLACE');
+                          """)
             
             ## If successfull, insert log
             self.insert_query_history_delta_log(start_ts_ms, end_ts_ms)
@@ -731,7 +908,7 @@ class QueryProfiler(DeltaOptimizerBase):
                 CREATE OR REPLACE TABLE {self.database_name}.query_summary_statistics
                 AS (
                   WITH raw_query_stats AS (
-                    SELECT query_id,
+                    SELECT query_hash AS query_id, -- v.1.4.0 replace id with hash to actually aggregate by distinct query text
                     AVG(duration) AS AverageQueryDuration,
                     AVG(rows_produced) AS AverageRowsProduced,
                     COUNT(*) AS TotalQueryRuns,
@@ -739,7 +916,7 @@ class QueryProfiler(DeltaOptimizerBase):
                     FROM {self.database_name}.raw_query_history_statistics
                     WHERE status IN('FINISHED', 'CANCELED')
                     AND statement_type IN ('SELECT', 'INSERT', 'REPLACE')
-                    GROUP BY query_id
+                    GROUP BY query_hash
                   )
                   SELECT 
                   *
@@ -751,7 +928,8 @@ class QueryProfiler(DeltaOptimizerBase):
             if self.scrub_views == True:
               
               ## Parse SQL Query and Save into parsed distinct queries table
-              df_pre_clean = self.spark.sql(f"""SELECT DISTINCT query_id, query_text FROM {self.database_name}.raw_query_history_statistics""")
+              ## v.1.4.0 replace query_id with query_hash - this should speed the parsing process a LOT
+              df_pre_clean = self.spark.sql(f"""SELECT DISTINCT query_hash, query_text FROM {self.database_name}.raw_query_history_statistics""")
 
               ## Add View Definition Replacement Here before Profiling
 
@@ -772,17 +950,18 @@ class QueryProfiler(DeltaOptimizerBase):
                       collect_list(view_text) AS view_text_list
                       FROM queries AS q
                       LEFT JOIN views AS v ON REGEXP_REPLACE(q.query_text, '`', '') ILIKE (CONCAT('%', v.view_name, '%')) --this is expensive but we gotta do it for now
-                      GROUP BY q.query_id, q.query_text, REGEXP_REPLACE(q.query_text, '`', '')
+                      GROUP BY q.query_hash, q.query_text, REGEXP_REPLACE(q.query_text, '`', '')
                       )
                       --clean up views and replace with table definition
                       SELECT
-                      query_id,
+                      query_hash,
                       replace_query_with_views(scrubbed_query, view_name_list, view_text_list) AS query_text
                       FROM view_int""")
               
               
             elif self.scrub_views == False:
-              df = self.spark.sql(f"""SELECT DISTINCT query_id, query_text FROM {self.database_name}.raw_query_history_statistics""")
+              ## v.1.4.0 replace query_id with self generated query_hash
+              df = self.spark.sql(f"""SELECT DISTINCT query_hash, query_text FROM {self.database_name}.raw_query_history_statistics""")
               
             ## Profile full tables
 
@@ -795,39 +974,57 @@ class QueryProfiler(DeltaOptimizerBase):
             self.spark.sql(f"""
                 MERGE INTO {self.database_name}.parsed_distinct_queries AS target
                 USING new_parsed AS source
-                ON source.query_id = target.query_id
+                ON source.query_hash = target.query_hash
                 WHEN MATCHED THEN UPDATE SET target.query_text = source.query_text
                 WHEN NOT MATCHED THEN 
-                    INSERT (target.query_id, target.query_text, target.profiled_columns) 
-                    VALUES (source.query_id, source.query_text, source.profiled_columns)""")
+                    INSERT (target.query_hash, target.query_text, target.profiled_columns) 
+                    VALUES (source.query_hash, source.query_text, source.profiled_columns)""")
             
             ## Calculate statistics on profiled queries
 
+            ## v1.4.1 Adding table filtering earlier in the process, need to fully qualify table names. Currently optimizer will NOT do a good job at finding the tables when a USE statement is used instead of the real names
             pre_stats_df = (self.spark.sql(f"""
                   WITH exploded_parsed_cols AS (SELECT DISTINCT
                   explode(profiled_columns) AS explodedCols,
-                  query_id,
+                  query_hash,
                   query_text
                   FROM {self.database_name}.parsed_distinct_queries
                   ),
 
                   step_2 AS (SELECT DISTINCT
-                  split(explodedCols, ":")[0] AS TableName,
+                  CONCAT(COALESCE(REVERSE(SPLIT(split(explodedCols, ":")[0], '[.]'))[2], 'hive_metastore'), 
+                    '.', COALESCE(REVERSE(SPLIT(split(explodedCols, ":")[0], '[.]'))[1], 'default'), 
+                    '.', REVERSE(SPLIT(split(explodedCols, ":")[0], '[.]'))[0]) AS TableName, -- v1.4.1 !! Since we filter now, we have to handle table names that are not fully qualified
                   split(explodedCols, ":")[1] AS ColumnName,
                   root.query_text,
                   hist.*
                   FROM exploded_parsed_cols AS root
-                  LEFT JOIN {self.database_name}.query_summary_statistics AS hist ON root.query_id = hist.query_id --SELECT statements only included
+                  LEFT JOIN {self.database_name}.query_summary_statistics AS hist ON root.query_hash = hist.query_id --SELECT statements only included (v1.4.0 Query ID is Query Hash here now)
                   )
 
                   SELECT *,
                   size(split(query_text, ColumnName)) - 1 AS NumberOfColumnOccurrences
                   FROM step_2
                 """)
-                .withColumn("isUsedInJoin", self.checkIfJoinColumn(F.col("query_text"), F.concat(F.col("TableName"), F.lit("."), F.col("ColumnName"))))
+                           )
+            
+            
+            ## Add a database/catalog level inclusion/exclusion statement
+            
+            ## Add table filter inclusion/exclusion statements here
+            ## This inclusion logic is pre processing on class initialization, so just abide by the list
+            self.get_all_tables_to_monitor()
+            subset_tables_to_parse = self.get_table_list()
+            
+            pre_stats_df = pre_stats_df.filter(F.col("TableName").isin(subset_tables_to_parse))
+
+
+                
+            pre_stats_df  = (pre_stats_df.withColumn("isUsedInJoin", self.checkIfJoinColumn(F.col("query_text"), F.concat(F.col("TableName"), F.lit("."), F.col("ColumnName"))))
                 .withColumn("isUsedInFilter", self.checkIfFilterColumn(F.col("query_text"), F.concat(F.col("TableName"), F.lit("."), F.col("ColumnName"))))
                 .withColumn("isUsedInGroup", self.checkIfGroupColumn(F.col("query_text"), F.concat(F.col("TableName"), F.lit("."), F.col("ColumnName"))))
-                )
+                            )
+                
 
             pre_stats_df.createOrReplaceTempView("withUseFlags")
 
@@ -855,7 +1052,7 @@ class QueryProfiler(DeltaOptimizerBase):
                         SUM(isUsedInJoin) AS NumberOfQueriesUsedInJoin,
                         SUM(isUsedInFilter) AS NumberOfQueriesUsedInFilter,
                         SUM(isUsedInGroup) AS NumberOfQueriesUsedInGroup,
-                        COUNT(DISTINCT query_id) AS QueryReferenceCount,
+                        COUNT(DISTINCT query_id) AS QueryReferenceCount, -- This is the number if DISTINCT queries the column it used in, NOT runs
                         SUM(DurationTimesRuns) AS RawTotalRuntime,
                         AVG(AverageQueryDuration) AS AvgQueryDuration,
                         SUM(NumberOfColumnOccurrences) AS TotalColumnOccurrencesForAllQueries,
@@ -937,35 +1134,40 @@ class QueryProfiler(DeltaOptimizerBase):
 ######## Delta Profiler ##########
 class DeltaProfiler(DeltaOptimizerBase):
     
-    def __init__(self, monitored_db_csv = 'all', database_name="hive_metastore.delta_optimizer", shuffle_partitions=None):
+    def __init__(self, catalog_filter_mode='all', 
+                 catalog_filter_list=[], 
+                 database_filter_mode ='all', 
+                 database_filter_list=[], 
+                 table_filter_mode='all', 
+                 table_filter_list=[],
+                 database_name="hive_metastore.delta_optimizer", 
+                 shuffle_partitions=None):
         
         ## TO DO: MUST eventually deal with if someone says "all" dbs and config is not a subset, cause then it will monitor all catalogs and all databases
         ## Right now, we just default for 
         
         ## Makes fully qualified database name use hive_metastore by default
-        full_qualitfied_delta_optimizer_db_name = 'hive_metastore.delta_optimizer';
+        full_qualitfied_delta_optimizer_db_name = 'hive_metastore.delta_optimizer'
+        
         if len(database_name.split(".")) ==1:
           pass
         else: 
           full_qualitfied_delta_optimizer_db_name = database_name
 
-        super().__init__(database_name=full_qualitfied_delta_optimizer_db_name, shuffle_partitions=shuffle_partitions)
-        self.db_list = list(set([x.strip() if (x != '' and len(x.split(".")) >=2) else 'hive_metastore.' + x.strip() for x in monitored_db_csv.split(",")]))
-
-        ## Also get catalogs from fully qualified database names (so if db has a., then get first part, else, hive_metastore)
-        ## If monitored_catalogs != all
-
-        self.catalog_list = list(set([x.split(".")[0].strip() if x != '' and len(x.split(".")) >=2 else 'hive_metastore'  for x in monitored_db_csv.split(",")] + ['spark_catalog']))
-        self.table_list = []
-    
-        if ((len(self.db_list) == 1 and self.db_list[0].lower() == 'all') or len(self.db_list) == 0):
-            self.mode = 'all'
-        else:
-            self.mode = 'subset'
-            
+        ## Initializes the Core optimizer tables and defines the list of tables it is supposed to track and profile for this instance
+        super().__init__(database_name=full_qualitfied_delta_optimizer_db_name, 
+                         catalog_filter_mode = catalog_filter_mode, 
+                         catalog_filter_list=catalog_filter_list, 
+                         database_filter_mode=database_filter_mode, 
+                         database_filter_list = database_filter_list, 
+                         table_filter_mode=table_filter_mode, 
+                         table_filter_list=table_filter_list, 
+                         shuffle_partitions=shuffle_partitions)
+        
+        
         ## File size map
-        self.file_size_map = [{"max_table_size_gb": 8, "file_size": '64mb'},
-                 {"max_table_size_gb": 16, "file_size": '64mb'},
+        self.file_size_map = [{"max_table_size_gb": 8, "file_size": '16mb'},
+                 {"max_table_size_gb": 16, "file_size": '32mb'},
                  {"max_table_size_gb": 32, "file_size": '64mb'},
                  {"max_table_size_gb": 64, "file_size": '64mb'},
                  {"max_table_size_gb": 128, "file_size": '128mb'},
@@ -978,7 +1180,11 @@ class DeltaProfiler(DeltaOptimizerBase):
                  {"max_table_size_gb": 7168, "file_size": '1gb'},
                  {"max_table_size_gb": 10240, "file_size": '1gb'},
                  {"max_table_size_gb": 51200, "file_size": '1gb'},
-                 {"max_table_size_gb": 102400, "file_size": '1gb'}]
+                 {"max_table_size_gb": 102400, "file_size": '1gb'},
+                {"max_table_size_gb": 204800, "file_size": '1gb'},
+                {"max_table_size_gb": 409600, "file_size": '1gb'},
+                {"max_table_size_gb": 819200, "file_size": '1gb'},
+                {"max_table_size_gb": 1638400, "file_size": '2gb'}]
 
 
         self.file_size_df = (self.spark.createDataFrame(self.file_size_map))
@@ -987,9 +1193,6 @@ class DeltaProfiler(DeltaOptimizerBase):
         self.tbl_df = self.spark.sql(f"show tables in {self.database_name} like 'xxx_delta_optimizer'")
 
         return
-    
-    def get_db_list(self):
-      return self.db_list
     
     
     ### Static methods / udfs
@@ -1010,72 +1213,6 @@ class DeltaProfiler(DeltaOptimizerBase):
         final_sql = sample_string + ", ".join(str2) + sql_from
 
         return final_sql
-    
-    
-    def get_table_list(self):
-        return list(set(self.table_list))
-    
-    
-    def get_all_tables_to_monitor(self):
-        
-        try:
-          
-          ## Make this where your delta optimizer lives
-          ## self.database_name should be fully qualified with catalog name (default to hive_metastore)
-          tbl_df = self.spark.sql(f"show tables in {self.database_name} like 'xxx_delta_optimizer'")
-          self.table_list = []
-          
-          ## This returns nothing if not UC Enabled - default to having
-
-          for ct in self.spark.sql("""SHOW CATALOGS""").filter(F.col("catalog").isin(self.catalog_list)).collect():
-
-            ## Initialize Catalog default
-            cat = ct.catalog
-            print(cat)
-            
-            if len(cat) <= 1:
-              cat = 'hive_metastore'
-
-            if cat == "spark_catalog":
-              
-              print("This cluster is not UC enabled, assuming hive_metastore only")
-              cat = 'hive_metastore'
-
-
-            for db in self.spark.sql(f"""show databases IN {cat}""").filter((F.col("databaseName").isin(self.db_list)) |  (F.concat(F.lit(cat), F.lit('.'), F.col("databaseName")).isin(self.db_list))).collect():
-
-                #create a dataframe with list of tables from the database
-                df = self.spark.sql(f"show tables in {cat}.{db.databaseName}")
-                #union the tables list dataframe with main dataframe 
-                tbl_df = tbl_df.union(df)
-
-                ## Exclude temp views/tables
-                tbl_df = (tbl_df.filter(F.col("isTemporary") == F.lit('false')))
-
-                ## Check if in selected databases if mode is not all
-
-                if self.mode == "subset":
-
-                    tbl_df = tbl_df.filter(F.col("database").isin(self.db_list) |  (F.concat(F.lit(cat), F.lit('.'), F.col("database")).isin(self.db_list)))
-
-                tbl_df.createOrReplaceTempView("all_tables")
-
-                ## Need to add catalog level, for now, make this handled in the joins in the strategy level
-                df_tables = self.spark.sql(f"""
-                SELECT 
-                concat(COALESCE('{cat}', 'hive_metastore'),'.', database, '.', tableName) AS fully_qualified_table_name
-                FROM all_tables
-                """).collect()
-                new_tables = [i[0] for i in df_tables]
-
-                self.table_list = self.table_list + new_tables
-      
-
-
-        except Exception as e:
-            raise(e)
-        
-        return
 
     
     ## Parse Transaction Log
@@ -1167,7 +1304,9 @@ class DeltaProfiler(DeltaOptimizerBase):
         ## If you only run this, must get tables to monitor first
         self.get_all_tables_to_monitor()
         
-        for tbl in set(self.table_list):
+        table_list = self.get_table_list()
+
+        for tbl in table_list:
 
             print(f"Prepping Delta Table Stats: {tbl}")
 
@@ -1205,7 +1344,8 @@ class DeltaProfiler(DeltaOptimizerBase):
               
               ## For some reason, DESCRIBE DETAIL likes to use spark_catalog instead of the hive_metastore, which nothing else does
                 table_df = (self.spark.sql(f"""DESCRIBE DETAIL {tbl}""")
-                    .selectExpr("replace(name, 'spark_catalog', 'hive_metastore') AS name", 
+                            .where("format = 'delta'") ## v1.3.1 - Only run this analysis for delta tables
+                            .selectExpr("replace(name, 'spark_catalog', 'hive_metastore') AS name", 
                                 "sizeInBytes", "sizeInBytes/(1024*1024*1024) AS sizeInGB", 
                                 "partitionColumns")
                             )
@@ -1244,10 +1384,10 @@ class DeltaProfiler(DeltaOptimizerBase):
                 print(f"Failed to parse stats for {tbl} with error: {str(e)}")
                 continue
                 
-        ## Optimize tables (ironic? ahah)
-        print("Optimizing final tables to prepare to strategy ranking...")
-        self.spark.sql(f"""OPTIMIZE {self.database_name}.all_tables_cardinality_stats""")
-        self.spark.sql(f"""OPTIMIZE {self.database_name}.all_tables_table_stats""")
+              
+            ## This is now inside the for loop so the tables optimize after every run
+            self.spark.sql(f"""OPTIMIZE {self.database_name}.all_tables_cardinality_stats""")
+            self.spark.sql(f"""OPTIMIZE {self.database_name}.all_tables_table_stats""")
         
         return
     
@@ -1384,17 +1524,30 @@ class DeltaOptimizer(DeltaOptimizerBase):
     def getAnalyzeTableCommand(inputTableName, tableSizeInGb, relativeColumns):
 
         ### Really basic heuristic to calculate statistics, can increase nuance in future versions
-        tableSizeInGbLocal = float(tableSizeInGb)
+        sqlExpr = f"ANALYZE TABLE {inputTableName} COMPUTE STATISTICS FOR ALL COLUMNS;"
+        try: 
+          
+          tableSizeInGbLocal = float(tableSizeInGb)
 
-        if tableSizeInGbLocal <= 100:
-            sqlExpr = f"ANALYZE TABLE {inputTableName} COMPUTE STATISTICS FOR ALL COLUMNS;"
-            return sqlExpr
-        else:
-
+          if tableSizeInGbLocal > 100:
+            
             rel_Cols = str(relativeColumns).split(",")
             colExpr = ", ".join(rel_Cols)
-            sqlExpr = f"ANALYZE TABLE {inputTableName} COMPUTE STATISTICS FOR COLUMNS {colExpr};"
+            
+            ## If there are no columns to filter on, skip
+            if len(colExpr) >= 1:
+              sqlExpr = f"ANALYZE TABLE {inputTableName} COMPUTE STATISTICS FOR COLUMNS {colExpr};"
+              
             return sqlExpr
+
+          else:
+
+              
+              return sqlExpr
+            
+        except:
+          ## just return default if there are any problems (i.e. table size is not valid number - usually because of non delta tables)
+          return sqlExpr
 
         
         
@@ -1402,6 +1555,9 @@ class DeltaOptimizer(DeltaOptimizerBase):
     @F.udf("string")   
     def getAlterTableCommand(inputTableName, fileSizeMapInMb, isMergeUsed):
 
+      defaultAlterExpr = "ALTER TABLE {inputTableName} SET TBLPROPERTIES ('delta.tuneFileSizesForRewrites' = 'false');"
+      try:
+        
         if float(isMergeUsed) >=1:
 
             alterExpr = f"ALTER TABLE {inputTableName} SET TBLPROPERTIES ('delta.targetFileSize' = '{fileSizeMapInMb}', 'delta.tuneFileSizesForRewrites' = 'true');"
@@ -1409,6 +1565,10 @@ class DeltaOptimizer(DeltaOptimizerBase):
         else: 
             alterExpr = f"ALTER TABLE {inputTableName} SET TBLPROPERTIES ('delta.targetFileSize' = '{fileSizeMapInMb}', 'delta.tuneFileSizesForRewrites' = 'false');"
             return alterExpr
+          
+      except:
+        return defaultAlterExpr
+        
     
     
     @staticmethod
@@ -1566,7 +1726,9 @@ class DeltaOptimizer(DeltaOptimizerBase):
                                       
                                       )
                                       SELECT * FROM final_results""")
+                            .persist()
                             .withColumn("ColumnOrderingCommandString", self.get_column_ordering_statements(F.col("TableName"), F.col("ZorderCols")))
+                            .persist()
                            )
             
             col_order_df.createOrReplaceTempView("col_order")
@@ -1577,6 +1739,7 @@ class DeltaOptimizer(DeltaOptimizerBase):
                             WHEN MATCHED THEN 
                             UPDATE SET 
                             target.ColumnOrderingCommandString = source.ColumnOrderingCommandString
+                            
                       """)
                             
             ## Build an ANALYZE TABLE command with the following heuristics: 
