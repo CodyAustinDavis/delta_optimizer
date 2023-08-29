@@ -29,6 +29,7 @@ Overview: This file provides 4 Main Classes:
 class DeltaOptimizerBase():
     
     def __init__(self, database_name="hive_metastore.delta_optimizer", 
+                 database_location=None,
                  catalog_filter_mode='all', 
                  catalog_filter_list=[], 
                  database_filter_mode='all', 
@@ -40,6 +41,7 @@ class DeltaOptimizerBase():
         ## Assumes running on a spark environment
 
         self.database_name = database_name
+        self.database_location = database_location
         self.spark = SparkSession.getActiveSession()
         self.shuffle_partitions = shuffle_partitions if None else self.spark.sparkContext.defaultParallelism*2
         ## set parallelism based on cluster
@@ -89,13 +91,17 @@ class DeltaOptimizerBase():
           
         
         
-        print(f"Initializing Delta Optimizer at database location: {self.database_name}")
+        print(f"Initializing Delta Optimizer at database: {self.database_name} \n with location: {self.database_location}")
         ### Initialize Tables on instantiation
 
         ## Create Database
         
         try: 
-          self.spark.sql(f"""CREATE DATABASE IF NOT EXISTS {self.database_name};""")
+
+          if self.database_location is not None:
+            self.spark.sql(f"""CREATE DATABASE IF NOT EXISTS {self.database_name} LOCATION '{self.database_location}';""")
+          else:
+            self.spark.sql(f"""CREATE DATABASE IF NOT EXISTS {self.database_name};""")
           
         except Exception as e:
           print(f"""Creating the database at location: {self.database_name} did not work...\n 
@@ -429,6 +435,7 @@ class QueryProfiler(DeltaOptimizerBase):
     
     def __init__(self, workspace_url, warehouse_ids, 
                  database_name="hive_metastore.delta_optimizer", 
+                 database_location=None,
                  catalogs_to_check_views=["hive_metastore"], 
                  catalog_filter_mode='all', 
                  catalog_filter_list=[], 
@@ -442,6 +449,7 @@ class QueryProfiler(DeltaOptimizerBase):
         ## Assumes running on a spark environment
         ## This is getting the subset of tables to filter for given all the subset logic
         super().__init__(database_name=database_name, 
+                         database_location=database_location,
                          catalog_filter_mode = catalog_filter_mode, 
                          catalog_filter_list=catalog_filter_list, 
                          database_filter_mode=database_filter_mode, 
@@ -1141,6 +1149,7 @@ class DeltaProfiler(DeltaOptimizerBase):
                  table_filter_mode='all', 
                  table_filter_list=[],
                  database_name="hive_metastore.delta_optimizer", 
+                 database_location=None,
                  shuffle_partitions=None):
         
         ## TO DO: MUST eventually deal with if someone says "all" dbs and config is not a subset, cause then it will monitor all catalogs and all databases
@@ -1149,13 +1158,14 @@ class DeltaProfiler(DeltaOptimizerBase):
         ## Makes fully qualified database name use hive_metastore by default
         full_qualitfied_delta_optimizer_db_name = 'hive_metastore.delta_optimizer'
         
-        if len(database_name.split(".")) ==1:
-          pass
+        if len(database_name.split(".")) == 1:
+          full_qualitfied_delta_optimizer_db_name = 'hive_metastore.' + database_name
         else: 
           full_qualitfied_delta_optimizer_db_name = database_name
 
         ## Initializes the Core optimizer tables and defines the list of tables it is supposed to track and profile for this instance
         super().__init__(database_name=full_qualitfied_delta_optimizer_db_name, 
+                         database_location=database_location,
                          catalog_filter_mode = catalog_filter_mode, 
                          catalog_filter_list=catalog_filter_list, 
                          database_filter_mode=database_filter_mode, 
@@ -1513,9 +1523,9 @@ class DeltaProfiler(DeltaOptimizerBase):
 
 class DeltaOptimizer(DeltaOptimizerBase):
     
-    def __init__(self, database_name="hive_metastore.delta_optimizer", shuffle_partitions=None):
+    def __init__(self, database_name="hive_metastore.delta_optimizer", database_location=None, shuffle_partitions=None):
         
-        super().__init__(database_name=database_name, shuffle_partitions=shuffle_partitions)
+        super().__init__(database_name=database_name, database_location=database_location, shuffle_partitions=shuffle_partitions)
         
         return
     

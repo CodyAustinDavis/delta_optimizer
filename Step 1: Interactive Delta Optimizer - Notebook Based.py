@@ -1,8 +1,8 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC 
+# MAGIC
 # MAGIC ## This notebook imports the Delta Optimizer and does the following: 
-# MAGIC 
+# MAGIC
 # MAGIC <ul> 
 # MAGIC   
 # MAGIC   <li> Poll Query History API and get List of Queries for a set of SQL Warehouses (this is incremental, so you just define a lookback period for the first time you poll)
@@ -10,7 +10,7 @@
 # MAGIC   <li> Rank unified strategy
 # MAGIC     
 # MAGIC </ul>
-# MAGIC 
+# MAGIC
 # MAGIC ### Depedencies
 # MAGIC <li> Ensure that you either get a token as a secret or use a cluster with the env variable called DBX_TOKEN to authenticate to DBSQL
 
@@ -26,7 +26,7 @@ import os
 # COMMAND ----------
 
 # DBTITLE 1,Register and Retrieve DBX Auth Token
-DBX_TOKEN = "<token>"
+DBX_TOKEN = "dapia20ff88ba65037671d2ecafb73e8c847"
 
 # COMMAND ----------
 
@@ -38,6 +38,7 @@ dbutils.widgets.text("Server Hostname:", "")
 dbutils.widgets.text("Database Names (csv) - fully qualified or defaults to hive_metastore catalog:", "")
 dbutils.widgets.dropdown("Start Over?","No", ["Yes","No"])
 dbutils.widgets.text("Optimizer Output Database:", "hive_metastore.delta_optimizer")
+dbutils.widgets.text("Optimizer Output Location (optional):", "")
 
 # COMMAND ----------
 
@@ -50,7 +51,12 @@ start_over = dbutils.widgets.get("Start Over?")
 # COMMAND ----------
 
 database_output = dbutils.widgets.get("Optimizer Output Database:").strip()
-delta_optimizer = DeltaOptimizer(database_name=database_output)
+if len(dbutils.widgets.get("Optimizer Output Location (optional):").strip()) > 0:
+  database_location = dbutils.widgets.get("Optimizer Output Location (optional):").strip()
+else: 
+  database_location = None
+
+delta_optimizer = DeltaOptimizer(database_name=database_output, database_location=database_location)
 
 # COMMAND ----------
 
@@ -71,7 +77,7 @@ databases_raw = dbutils.widgets.get("Database Names (csv) - fully qualified or d
 clean_catalogs = list(set([i.split(".")[0].strip() if len(i.split(".")) == 2 else 'hive_metastore' for i in databases_raw]))
 
 
-query_profiler = QueryProfiler(workspaceName, warehouseIdsList, database_name=database_output, catalogs_to_check_views=clean_catalogs, scrub_views=True)
+query_profiler = QueryProfiler(workspaceName, warehouseIdsList, database_name=database_output, database_location=database_location, catalogs_to_check_views=clean_catalogs, scrub_views=True)
 
 query_profiler.build_query_history_profile(dbx_token = DBX_TOKEN, mode='auto', lookback_period_days=lookbackPeriod)
 
@@ -85,7 +91,7 @@ databases_raw = dbutils.widgets.get("Database Names (csv) - fully qualified or d
 
 
 ## Initialize class and pass in database csv string
-profiler = DeltaProfiler( monitored_db_csv= databases_raw, database_name=database_output) ## examples include 'default', 'mydb1,mydb2', 'all' or leave blank
+profiler = DeltaProfiler( monitored_db_csv= databases_raw, database_name=database_output, database_location=database_location) ## examples include 'default', 'mydb1,mydb2', 'all' or leave blank
 
 ## Get tables
 profiler.get_all_tables_to_monitor()
@@ -106,7 +112,7 @@ profiler.build_cardinality_stats()
 ####### Step 3: Build Strategy and Rank #######
 ## Build Strategy
 
-delta_optimizer = DeltaOptimizer(database_name=database_output)
+delta_optimizer = DeltaOptimizer(database_name=database_output, database_location=database_location)
 
 delta_optimizer.build_optimization_strategy()
 
