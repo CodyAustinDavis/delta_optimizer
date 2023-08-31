@@ -29,6 +29,7 @@ Overview: This file provides 4 Main Classes:
 class DeltaOptimizerBase():
     
     def __init__(self, database_name="hive_metastore.delta_optimizer", 
+                 database_location=None,
                  catalog_filter_mode='all', 
                  catalog_filter_list=[], 
                  database_filter_mode='all', 
@@ -40,6 +41,7 @@ class DeltaOptimizerBase():
         ## Assumes running on a spark environment
 
         self.database_name = database_name
+        self.database_location = database_location
         self.spark = SparkSession.getActiveSession()
         self.shuffle_partitions = shuffle_partitions if None else self.spark.sparkContext.defaultParallelism*2
         ## set parallelism based on cluster
@@ -89,23 +91,23 @@ class DeltaOptimizerBase():
           
         
         
-        print(f"Initializing Delta Optimizer at database location: {self.database_name}")
+        print(f"Initializing Delta Optimizer at database: {self.database_name} \n with location: {self.database_location}")
         ### Initialize Tables on instantiation
 
         ## Create Database
-      
+        
         try: 
-          self.spark.sql(f"""CREATE DATABASE IF NOT EXISTS {self.database_name};""")
+
+          if self.database_location is not None:
+            self.spark.sql(f"""CREATE DATABASE IF NOT EXISTS {self.database_name} LOCATION '{self.database_location}';""")
+          else:
+            self.spark.sql(f"""CREATE DATABASE IF NOT EXISTS {self.database_name};""")
           
         except Exception as e:
           print(f"""Creating the database at location: {self.database_name} did not work...\n 
           Please ensure the cluster is a UC Enabled cluster or just use hive_metastore""")
           raise(e)
         
-
-        ## Create empty table list dataframe
-        self.tbl_df = self.spark.sql(f"show tables in {self.database_name} like 'xxx_delta_optimizer'")
-
         ## Query Profiler Tables
         self.spark.sql(f"""CREATE TABLE IF NOT EXISTS {self.database_name}.query_history_log 
                            (Id BIGINT GENERATED ALWAYS AS IDENTITY,
@@ -299,7 +301,7 @@ class DeltaOptimizerBase():
        
       ## This process goes through each filtering level rule by catalog --> database --> table. 
       ## No matter which rule, the lower level in the hieracrhy is ALWAYS a subset of the output of the above level. 
-      #print("Getting Tables to monitor...")
+      print("Getting Tables to monitor...")
       try:
         ## initialize the empty table list data frame, we will union to this local version
         tbl_df = self.tbl_df
@@ -314,17 +316,13 @@ class DeltaOptimizerBase():
         elif self.catalog_filter_mode == 'all':
           catalogs_to_run = self.spark.sql("""SHOW CATALOGS""").collect()
 
-        else:
-           print("Incorrect catalog mode selected...")
-
         self.clean_catalog_list = list(set(self.clean_catalog_list + [i[0] for i in catalogs_to_run]))
         
-        #print(f"Monitored Catalogs: {self.clean_catalog_list}")
 
         for ct in catalogs_to_run:
-
           ## Initialize Catalog default
           cat = ct.catalog
+          #print(cat)
 
           if len(cat) <= 1:
             cat = 'hive_metastore'
@@ -394,21 +392,20 @@ class DeltaOptimizerBase():
     def truncate_delta_optimizer_results(self):
         
         print(f"Truncating database (and all tables within): {self.database_name}...")
-        df = self.spark.sql(f"""SHOW TABLES IN {self.database_name}""").select("tableName").collect()
+        df = self.spark.sql(f"""SHOW TABLES IN {self.database_name}""").filter(F.col("database") == F.lit(self.database_name)).select("tableName").collect()
 
         for i in df: 
             table_name = i[0]
-            print(f"Truncating table Table: {table_name}...")
+            print(f"Deleting Table: {table_name}...")
             self.spark.sql(f"""TRUNCATE TABLE {self.database_name}.{table_name}""")
             
         print(f"Database: {self.database_name} successfully Truncated!")
-
         return
       
     def drop_delta_optimizer(self):
         
         print(f"Truncating database (and all tables within): {self.database_name}...")
-        df = self.spark.sql(f"""SHOW TABLES IN {self.database_name}""").select("tableName").collect()
+        df = self.spark.sql(f"""SHOW TABLES IN {self.database_name}""").filter(F.col("database") == F.lit(self.database_name)).select("tableName").collect()
 
         self.spark.sql(f"""DROP DATABASE {self.database_name} CASCADE;""")
         
@@ -438,6 +435,7 @@ class QueryProfiler(DeltaOptimizerBase):
     
     def __init__(self, workspace_url, warehouse_ids, 
                  database_name="hive_metastore.delta_optimizer", 
+                 database_location=None,
                  catalogs_to_check_views=["hive_metastore"], 
                  catalog_filter_mode='all', 
                  catalog_filter_list=[], 
@@ -451,6 +449,7 @@ class QueryProfiler(DeltaOptimizerBase):
         ## Assumes running on a spark environment
         ## This is getting the subset of tables to filter for given all the subset logic
         super().__init__(database_name=database_name, 
+                         database_location=database_location,
                          catalog_filter_mode = catalog_filter_mode, 
                          catalog_filter_list=catalog_filter_list, 
                          database_filter_mode=database_filter_mode, 
@@ -462,7 +461,7 @@ class QueryProfiler(DeltaOptimizerBase):
         self.workspace_url = workspace_url.strip()
         self.warehouse_ids_list = [i.strip() for i in warehouse_ids]
         self.warehouse_ids = ",".join(self.warehouse_ids_list)
-        self.catalogs_to_check_list = self.clean_catalog_list
+        self.catalogs_to_check_list = catalogs_to_check_views
         self.scrub_views = scrub_views ## optional param to opt out of new functionality for v1.2.0
         self.tbl_df = self.spark.sql(f"show tables in {self.database_name} like 'xxx_delta_optimizer'")
 
@@ -655,7 +654,7 @@ class QueryProfiler(DeltaOptimizerBase):
  
 
     ## If no direct time ranges provided (like after a first load, just continue where the log left off)
-    def get_most_recent_history_from_log(self, mode='auto', lookback_period=7):
+    def get_most_recent_history_from_log(self, mode='auto', lookback_period=3):
       
         ## This function gets the most recent end timestamp of the query history range, and returns new range from then to current timestamp
         
@@ -688,10 +687,6 @@ class QueryProfiler(DeltaOptimizerBase):
                                '{self.workspace_url}', ('{start_ts_ms}'::double/1000)::timestamp, 
                                ('{end_ts_ms}'::double/1000)::timestamp)
             """)
-
-            ## v1.4.2 - Add optimization for query history log
-            self.spark.sql(f"""OPTIMIZE {self.database_name}.query_history_log ZORDER BY (StartTimestamp)""")
-
         except Exception as e:
             raise(e)
     
@@ -699,24 +694,18 @@ class QueryProfiler(DeltaOptimizerBase):
     ## given a list of catalogs (or just hive_metastore) get a df of all views and their definitions to ensure we profile the source tables
     def get_all_view_texts_df(self):
 
-      ## Ensure you get the tables to monitor you need before running this async
-      
-      self.get_all_tables_to_monitor()
-
+      catalogs_to_check_list = self.catalogs_to_check_list
       self.spark.conf.set("spark.sql.shuffle.partitions", "1")
       full_view_list = []
 
+      ### TECH DEBT: For now, this is not filtering on the same databases as the views, it goes much broader, but in the future let the user specificy to just the databases. It goes broader because many users do not keep good track of where the source database tables and views are across databases. 
+      
       ## Confirm catalogs exist
-      catalog_list = self.get_catalog_list()
+      catalog_list = list(set([i[0] for i in self.spark.sql("""SHOW CATALOGS""").filter(F.col("catalog").isin(*catalogs_to_check_list)).collect()]))
 
       for c in catalog_list: 
 
-
-          ## database_list is local to this function
-          ## v1.5.0 - Add more filtering to only databases either explicitly selected in params ## This means the USER must know the source databases for the underlying views and provide it or it will be skipped
-          this_catalogs_databases_in_list = [i.lower().replace(c.lower() + ".", "") for i in self.get_database_list() if i.lower().startswith(c.lower())]
-
-          database_list = list(set([i[0] for i in self.spark.sql(f"SHOW databases IN {c}").filter(F.col("databaseName").isin(*this_catalogs_databases_in_list)).collect() if i != 'information_schema']))
+          database_list = list(set([i[0] for i in self.spark.sql(f"SHOW databases IN {c}").collect() if i != 'information_schema']))
 
           for d in database_list:
               if d == 'information_schema':
@@ -736,7 +725,7 @@ class QueryProfiler(DeltaOptimizerBase):
                     full_view_list.append(views_df)
                   
                 except Exception as e:
-                  #TO DO v1.2.0 - Skipping these, people shouldnt name databases poorly anyways
+                  #TECH DEBT v1.2.0 - Skipping these, people shouldnt name databases poorly anyways
                   print(f"Was not able to process database {d}  skipping file(some special characters are not yet supported in database names (i.e. -! )")
                   pass
                   
@@ -770,7 +759,6 @@ class QueryProfiler(DeltaOptimizerBase):
 
 
       print(f"View List: \n {all_views}")
-      
       ## If there are no views, just send back empty df
       if len(all_views) == 0:
         all_views = [{"view_name":None, "view_text": None}]
@@ -838,7 +826,7 @@ class QueryProfiler(DeltaOptimizerBase):
         initial_resp = endp_resp.get("res")
         
         if initial_resp is None:
-            print(f"DBSQL Has no queries on the warehouse for these times:{start_ts_ms} - {end_ts_ms} or there is an auth issue... No API response")
+            print(f"DBSQL Has no queries on the warehouse for these times:{start_ts_ms} - {end_ts_ms}")
             initial_resp = []
             ## Continue anyways cause there could be old queries and we want to still compute aggregates
         
@@ -848,14 +836,15 @@ class QueryProfiler(DeltaOptimizerBase):
         
 
         if has_next_page is True:
-            print(f"Paging through query history...")
-
+            print(f"Has next page?: {has_next_page}")
+            print(f"Getting next page: {next_page}")
 
         ## Page through results   
         page_responses = []
 
         while has_next_page is True: 
 
+            print(f"Getting results for next page... {next_page}")
 
             raw_page_request = {
             "include_metrics": "true",
@@ -1160,6 +1149,7 @@ class DeltaProfiler(DeltaOptimizerBase):
                  table_filter_mode='all', 
                  table_filter_list=[],
                  database_name="hive_metastore.delta_optimizer", 
+                 database_location=None,
                  shuffle_partitions=None):
         
         ## TO DO: MUST eventually deal with if someone says "all" dbs and config is not a subset, cause then it will monitor all catalogs and all databases
@@ -1168,13 +1158,14 @@ class DeltaProfiler(DeltaOptimizerBase):
         ## Makes fully qualified database name use hive_metastore by default
         full_qualitfied_delta_optimizer_db_name = 'hive_metastore.delta_optimizer'
         
-        if len(database_name.split(".")) ==1:
-          pass
+        if len(database_name.split(".")) == 1:
+          full_qualitfied_delta_optimizer_db_name = 'hive_metastore.' + database_name
         else: 
           full_qualitfied_delta_optimizer_db_name = database_name
 
         ## Initializes the Core optimizer tables and defines the list of tables it is supposed to track and profile for this instance
         super().__init__(database_name=full_qualitfied_delta_optimizer_db_name, 
+                         database_location=database_location,
                          catalog_filter_mode = catalog_filter_mode, 
                          catalog_filter_list=catalog_filter_list, 
                          database_filter_mode=database_filter_mode, 
@@ -1532,9 +1523,9 @@ class DeltaProfiler(DeltaOptimizerBase):
 
 class DeltaOptimizer(DeltaOptimizerBase):
     
-    def __init__(self, database_name="hive_metastore.delta_optimizer", shuffle_partitions=None):
+    def __init__(self, database_name="hive_metastore.delta_optimizer", database_location=None, shuffle_partitions=None):
         
-        super().__init__(database_name=database_name, shuffle_partitions=shuffle_partitions)
+        super().__init__(database_name=database_name, database_location=database_location, shuffle_partitions=shuffle_partitions)
         
         return
     
@@ -1888,62 +1879,3 @@ class DeltaOptimizer(DeltaOptimizerBase):
         return rankings_df
 
 ###############################################################
-
-
-            
-## Insert a query history pull into delta log to track state
-if __name__ == '__main__':
-    
-    DBX_TOKEN = os.environ.get("DBX_TOKEN")
-    
-    ## Assume running in a Databricks notebook
-    dbutils.widgets.dropdown("Query History Lookback Period (days)", defaultValue="3",choices=["1","3","7","14","30","60","90"])
-    dbutils.widgets.text("SQL Warehouse Ids (csv list)", "")
-    dbutils.widgets.text("Workspace DNS:", "")
-    
-    lookbackPeriod = int(dbutils.widgets.get("Query History Lookback Period (days)"))
-    warehouseIdsList = [i.strip() for i in dbutils.widgets.get("SQL Warehouse Ids (csv list)").split(",")]
-    workspaceName = dbutils.widgets.get("Workspace DNS:").strip()
-    warehouse_ids = dbutils.widgets.get("SQL Warehouse Ids (csv list)")
-    print(f"Loading Query Profile to delta from workspace: {workspaceName} from Warehouse Ids: {warehouseIdsList} for the last {lookbackPeriod} days...")
-    
-    #### Step 1: Build Profile
-    ## Initialize Profiler
-    query_profiler = QueryProfiler(workspaceName, warehouseIdsList)
-    
-    
-    query_profiler.build_query_history_profile( dbx_token = DBX_TOKEN, mode='auto', lookback_period_days=lookbackPeriod)
-    
-    
-    ##### Step 2: Build stats from transaction logs/table data
-    
-    ## Assume running on Databricks notebooks if not imported
-    dbutils.widgets.text("Database Names (csv):", "")
-    databases_raw = dbutils.widgets.get("Database Names (csv):")
-    
-    
-    ## Initialize class and pass in database csv string
-    profiler = DeltaProfiler(monitored_db_csv='default') ## examples include 'default', 'mydb1,mydb2', 'all' or leave blank
-    
-    ## Get tables
-    profiler.get_all_tables_to_monitor()
-    
-    ## Get predicate analysis for tables
-    profiler.parse_stats_for_tables()
-    
-    ## Build final table output
-    profiler.build_all_tables_stats()
-    
-    ## Generate cardinality stats
-    profiler.build_cardinality_stats()
-    
-    
-    ####### Step 3: Build Strategy and Rank
-    dbutils.widgets.dropdown("optimizeMethod", "Both", ["Reads", "Writes", "Both"])
-    optimize_method = dbutils.widgets.get("optimizeMethod")
-    
-    ## Build Strategy
-    delta_optimizer = DeltaOptimizer()
-
-    delta_optimizer.build_optimization_strategy()
-    
