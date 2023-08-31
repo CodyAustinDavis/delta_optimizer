@@ -14,7 +14,7 @@
 # MAGIC       
 # MAGIC #### Roadmap: 
 # MAGIC 
-# MAGIC 1. Use DLT to auto optimize LIVE and Normal Delta Tables if possible
+# MAGIC 1. Be more selective about type of analyze statements depending on size of table and update frquency. (less frequently updated tables dont need it as much)
 # MAGIC 2. Use DLT metaprogramming framework to run in parallel (performance implications)
 # MAGIC 3. Use Jobs API to automatically set up a daily / hourly job for this. This is NOT always recommended by default. The optimize timing greatly depends on the ETL pipelines
 # MAGIC 4. Dyanmically decide how often to run ANALYZE TABLE commands based on table size mapping (job that does this for you)
@@ -32,15 +32,11 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -r deltaoptimizer/requirements.txt
-
-# COMMAND ----------
-
 from pyspark.sql.functions import *
 
 # COMMAND ----------
 
-from deltaoptimizer.deltaoptimizer import DeltaOptimizerBase, DeltaProfiler, QueryProfiler, DeltaOptimizer
+from deltaoptimizer import DeltaOptimizerBase, DeltaProfiler, QueryProfiler, DeltaOptimizer
 
 # COMMAND ----------
 
